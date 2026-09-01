@@ -76,7 +76,7 @@ assert_before() {
 	local fetch_marker=$2
 	local extract_marker=$3
 	local label=$4
-	local fetch_line extract_line fetch_text fetch_prefix
+	local fetch_line extract_line fetch_text fetch_prefix fetch_suffix
 
 	[[ $(active_matches "$file" "$fetch_marker") -eq 1 ]] ||
 		fail "$label must have exactly one verified fetch"
@@ -87,6 +87,10 @@ assert_before() {
 	fetch_prefix=${fetch_text%%"$fetch_marker"*}
 	[[ $fetch_prefix =~ ^[[:space:]]*bash[[:space:]][^\;\&\|\(\)]*$ ]] ||
 		fail "$label verified fetch is disabled or conditionally chained"
+	fetch_suffix=${fetch_text#*"$fetch_marker"}
+	fetch_suffix=${fetch_suffix//[[:space:]]/}
+	[[ -z $fetch_suffix || $fetch_suffix == ";\\" ]] ||
+		fail "$label verified fetch has an unsafe suffix"
 	extract_line=$(line_for "$file" "$extract_marker") ||
 		fail "$label extraction is missing"
 	((fetch_line < extract_line)) ||
@@ -99,11 +103,29 @@ assert_no_unverified_writer() {
 	local label=$3
 
 	awk -v archive="$archive" '
-		$0 !~ /^[[:space:]]*#/ && index($0, archive) &&
-		($0 ~ /(^|[[:space:];])(curl|wget)([[:space:]]|$)/ ||
-		 $0 ~ /(^|[[:space:];])(cp|mv|dd|tee)([[:space:]]|$)/ ||
-		 $0 ~ /fetch-verify\.sh"?([[:space:]]|$)/) { count++ }
-		END { exit count == 1 ? 0 : 1 }' "$file" ||
+		function inspect(cmdline) {
+			if (cmdline ~ /^[[:space:]]*#/ || !index(cmdline, archive)) return
+			if (cmdline ~ /(^|[[:space:];])(curl|wget)([[:space:]]|$)/) count++
+			if (cmdline ~ /(^|[[:space:];])(cp|mv|dd|tee)([[:space:]]|$)/) count++
+			if (cmdline ~ /fetch-verify\.sh"?([[:space:]]|$)/) count++
+		}
+		{
+			line = $0
+			sub(/\\[[:space:]]*$/, "", line)
+			cmdline = cmdline (cmdline == "" ? "" : " ") line
+			if ($0 !~ /\\[[:space:]]*$/) {
+				parts = split(cmdline, segment, ";")
+				for (part = 1; part <= parts; part++) inspect(segment[part])
+				cmdline = ""
+			}
+		}
+		END {
+			if (cmdline != "") {
+				parts = split(cmdline, segment, ";")
+				for (part = 1; part <= parts; part++) inspect(segment[part])
+			}
+			exit count == 1 ? 0 : 1
+		}' "$file" ||
 		fail "$label archive has an unverified or duplicate writer"
 }
 
