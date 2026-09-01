@@ -1,11 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+set -x
 
 NGINX_VERSION=1.18.0
+NGINX_SHA256=4c373e7ab5bf91d34a4f11a0c9496561061ba5eee6020db272a17a7228d35f99
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source_archive="$HOME/src/nginx-${NGINX_VERSION}.tar.gz"
 
-mkdir ~/src
+mkdir -p "$HOME/src"
 
-set -eux; \
-    curl "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o - | tar zxC ~/src -f -;
+bash "$repo_root/.github/scripts/fetch-verify.sh" "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$NGINX_SHA256" "$source_archive"
+tar -xzf "$source_archive" -C "$HOME/src"
 
 # Pre-reqs:
 # diffstat libpcre2-16-0 libpcre2-32-0 libpcre2-dev libpcre2-posix2 quilt

@@ -27,6 +27,9 @@ RUN set -eux; \
 
 FROM nginx:stable@sha256:146adea4768b83c607d0bdfa4188464e3da6e0a3ad4475db1d1d8f64f27c29cc as ngx-coraza
 
+ARG NGINX_SOURCE_VERSION=1.28.3
+ARG NGINX_SOURCE_SHA256=2c96a946bfb0882a21744ed429770a2123ae1828c7c48665092993ddee91a918
+
 COPY --from=go-builder /usr/local/include/coraza /usr/local/include/coraza
 COPY --from=go-builder /usr/local/lib/libcoraza.a /usr/local/lib
 COPY --from=go-builder /usr/local/lib/libcoraza.so /usr/local/lib
@@ -51,7 +54,10 @@ COPY . /usr/src/coraza-nginx
 
 # Download sources
 RUN set -eux; \
-    curl "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o - | tar zxC /usr/src -f -;
+    test "$NGINX_VERSION" = "$NGINX_SOURCE_VERSION"; \
+    bash /usr/src/coraza-nginx/.github/scripts/fetch-verify.sh "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$NGINX_SOURCE_SHA256" /tmp/nginx.tar.gz; \
+    tar -xzf /tmp/nginx.tar.gz -C /usr/src; \
+    rm -f /tmp/nginx.tar.gz;
     # Reuse same cli arguments as the nginx:alpine image used to build
 
 RUN set -eux; \
@@ -74,14 +80,18 @@ COPY --from=go-builder /usr/local/lib/libcoraza.so /usr/local/lib
 RUN ldconfig -v
 
 COPY ./t /tmp/t
+COPY .github/versions.env .github/scripts/fetch-verify.sh /tmp/downloads/
 
-RUN apt-get update -qq && \
-    apt-get install -qq --no-install-recommends curl perl && \
-    curl http://hg.nginx.org/nginx-tests/archive/tip.tar.gz -o tip.tar.gz && \
-    tar xzf tip.tar.gz && \
-    cd nginx-tests-* && \
-    cp /tmp/t/* . && \
-    export TEST_NGINX_BINARY=/usr/sbin/nginx && \
-    export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends ca-certificates curl perl; \
+    rm -rf /var/lib/apt/lists/*; \
+    . /tmp/downloads/versions.env; \
+    bash /tmp/downloads/fetch-verify.sh "https://github.com/nginx/nginx-tests/archive/${NGINX_TESTS_REF}.tar.gz" "$NGINX_TESTS_SHA256" /tmp/nginx-tests.tar.gz; \
+    tar -xzf /tmp/nginx-tests.tar.gz; \
+    rm -f /tmp/nginx-tests.tar.gz; \
+    cd nginx-tests-*; \
+    cp /tmp/t/* .; \
+    export TEST_NGINX_BINARY=/usr/sbin/nginx; \
+    export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;"; \
     prove -v coraza*.t 2>&1 || true
-
