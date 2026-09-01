@@ -37,7 +37,9 @@ jobs:
           persist-credentials: false
 
       - name: Check download verification policy
-        run: bash tests/verified-downloads.sh
+        run: |
+          bash tests/verified-downloads.sh
+          bash tests/verified-downloads-negative.sh
 
   compile:
     permissions:

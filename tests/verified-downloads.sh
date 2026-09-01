@@ -64,19 +64,47 @@ line_for() {
         END { if (!found) exit 1 }' "$file"
 }
 
+active_matches() {
+	local file=$1
+	local needle=$2
+	awk -v needle="$needle" 'index($0, needle) && $0 !~ /^[[:space:]]*#/ { count++ }
+		END { print count + 0 }' "$file"
+}
+
 assert_before() {
 	local file=$1
 	local fetch_marker=$2
 	local extract_marker=$3
 	local label=$4
-	local fetch_line extract_line
+	local fetch_line extract_line fetch_text fetch_prefix
+
+	[[ $(active_matches "$file" "$fetch_marker") -eq 1 ]] ||
+		fail "$label must have exactly one verified fetch"
 
 	fetch_line=$(line_for "$file" "$fetch_marker") ||
 		fail "$label verified fetch is missing"
+	fetch_text=$(sed -n "${fetch_line}p" "$file")
+	fetch_prefix=${fetch_text%%"$fetch_marker"*}
+	[[ $fetch_prefix =~ ^[[:space:]]*bash[[:space:]][^\;\&\|\(\)]*$ ]] ||
+		fail "$label verified fetch is disabled or conditionally chained"
 	extract_line=$(line_for "$file" "$extract_marker") ||
 		fail "$label extraction is missing"
 	((fetch_line < extract_line)) ||
 		fail "$label archive is extracted before verification"
+}
+
+assert_no_unverified_writer() {
+	local file=$1
+	local archive=$2
+	local label=$3
+
+	awk -v archive="$archive" '
+		$0 !~ /^[[:space:]]*#/ && index($0, archive) &&
+		($0 ~ /(^|[[:space:];])(curl|wget)([[:space:]]|$)/ ||
+		 $0 ~ /(^|[[:space:];])(cp|mv|dd|tee)([[:space:]]|$)/ ||
+		 $0 ~ /fetch-verify\.sh"?([[:space:]]|$)/) { count++ }
+		END { exit count == 1 ? 0 : 1 }' "$file" ||
+		fail "$label archive has an unverified or duplicate writer"
 }
 
 docker_nginx_fetch='fetch-verify.sh "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$NGINX_SOURCE_SHA256" /tmp/nginx.tar.gz'
@@ -86,9 +114,12 @@ build_nginx_extract='tar -xzf "$source_archive"'
 
 assert_before "$dockerfile" "$docker_nginx_fetch" \
 	'tar -xzf /tmp/nginx.tar.gz' 'Docker nginx'
+assert_no_unverified_writer "$dockerfile" '/tmp/nginx.tar.gz' 'Docker nginx'
 assert_before "$dockerfile" "$docker_tests_fetch" \
 	'tar -xzf /tmp/nginx-tests.tar.gz' 'Docker nginx-tests'
+assert_no_unverified_writer "$dockerfile" '/tmp/nginx-tests.tar.gz' 'Docker nginx-tests'
 assert_before "$build_script" "$build_nginx_fetch" \
 	"$build_nginx_extract" 'build.sh nginx'
+assert_no_unverified_writer "$build_script" '"$source_archive"' 'build.sh nginx'
 
 printf 'verified downloads: ok\n'
