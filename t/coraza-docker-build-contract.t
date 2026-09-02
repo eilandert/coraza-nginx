@@ -34,6 +34,16 @@ like($dockerfile,
 like($dockerfile,
     qr/^\s*sha256sum -c nginx-tests\.sha256\s*&&\s*\\$/m,
     'Docker image checks the nginx-tests archive digest');
+# The digest checks above are only meaningful if each manifest is written from
+# the pinned ARG.  A hard-coded digest beside a correct ARG would satisfy every
+# assertion so far while verifying an entirely different archive.
+like($dockerfile,
+    qr/^\s*echo "\$\{LIBCORAZA_SHA256\}  \/tmp\/libcoraza\.zip" > \/tmp\/libcoraza\.sha256;\s*\\$/m,
+    'libcoraza manifest is generated from the pinned ARG');
+like($dockerfile,
+    qr/^\s*echo "\$\{NGINX_TESTS_SHA256\}  nginx-tests\.tar\.gz" > nginx-tests\.sha256 &&\s*\\$/m,
+    'nginx-tests manifest is generated from the pinned ARG');
+
 like($dockerfile, qr/^\s*prove -v coraza\*\.t\s*&&\s*\\$/m,
     'Docker build runs the connector test suite');
 like($dockerfile,
