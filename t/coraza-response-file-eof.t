@@ -114,9 +114,12 @@ my @includes = map { "-I$_" } (
     "$nginx/src/core",
     "$nginx/src/event",
     "$nginx/src/event/modules",
+    "$nginx/src/event/quic",
     "$nginx/src/os/unix",
     "$nginx/src/http",
     "$nginx/src/http/modules",
+    "$nginx/src/http/v2",
+    "$nginx/src/http/v3",
     "$nginx/objs",
     "$FindBin::Bin/../src",
 );
