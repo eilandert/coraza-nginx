@@ -11,8 +11,31 @@ use File::Temp qw(tempdir);
 use FindBin;
 
 my $nginx = $ENV{TEST_NGINX_SOURCE};
+
+# Every directory below is passed to the compiler as an -I path.  ngx_http.h
+# pulls in the v2, v3 and QUIC headers whenever those modules are configured,
+# so a tree missing any of them fails during compilation rather than skipping.
+my @needed = qw(
+    src/core
+    src/event
+    src/event/modules
+    src/event/quic
+    src/os/unix
+    src/http
+    src/http/modules
+    src/http/v2
+    src/http/v3
+    objs
+);
+
 plan skip_all => 'TEST_NGINX_SOURCE must name the nginx source tree'
-    unless defined $nginx && -d "$nginx/src/core";
+    unless defined $nginx;
+
+for my $dir (@needed) {
+    plan skip_all => "TEST_NGINX_SOURCE is missing $dir"
+        unless -d "$nginx/$dir";
+}
+
 plan tests => 3;
 
 my $tmp = tempdir(CLEANUP => 1);
