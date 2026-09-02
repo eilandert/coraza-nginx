@@ -106,8 +106,13 @@ assert_no_unverified_writer() {
 		function inspect(cmdline) {
 			if (cmdline ~ /^[[:space:]]*#/ || !index(cmdline, archive)) return
 			if (cmdline ~ /(^|[[:space:];])(curl|wget)([[:space:]]|$)/) count++
-			if (cmdline ~ /(^|[[:space:];])(cp|mv|dd|tee)([[:space:]]|$)/) count++
+			if (cmdline ~ /(^|[[:space:];])(cp|mv|dd|tee|ln|install|rsync)([[:space:]]|$)/) count++
 			if (cmdline ~ /fetch-verify\.sh"?([[:space:]]|$)/) count++
+			# A redirection writes the archive without naming any command
+			# above, so "cat other.tar.gz > archive" would otherwise leave
+			# fetch-verify.sh as the only counted writer.  inspect() has
+			# already established that this command mentions the archive.
+			if (index(cmdline, ">" ) && cmdline ~ />>?[[:space:]]*"?[^[:space:]|&;<]*$/) count++
 		}
 		{
 			line = $0

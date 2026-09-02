@@ -50,6 +50,19 @@ sed -i '/fetch-verify.sh.*nginx-${NGINX_VERSION}/a\    curl \\\n+      -o /tmp/n
 expect_rejected 'multiline unverified duplicate writer' 'Docker nginx archive has an unverified or duplicate writer'
 
 reset_fixture
+# A symlink swaps the archive contents after verification without invoking any
+# download command, so the writer census must count "ln" as a writer.
+# shellcheck disable=SC1003,SC2016
+sed -i '/fetch-verify.sh.*nginx-${NGINX_VERSION}/a\    ln -sf /tmp/other.tar.gz /tmp/nginx.tar.gz; \\' "$fixture/Dockerfile"
+expect_rejected 'symlink replacement after verification' 'Docker nginx archive has an unverified or duplicate writer'
+
+reset_fixture
+# A plain redirection names no download command at all.
+# shellcheck disable=SC1003,SC2016
+sed -i '/fetch-verify.sh.*nginx-${NGINX_VERSION}/a\    cat /tmp/other.tar.gz > /tmp/nginx.tar.gz; \\' "$fixture/Dockerfile"
+expect_rejected 'redirection replacement after verification' 'Docker nginx archive has an unverified or duplicate writer'
+
+reset_fixture
 sed -i 's@tar -xzf /tmp/nginx.tar.gz@tar -xzf /tmp/other.tar.gz@' "$fixture/Dockerfile"
 expect_rejected 'extraction detached from verified archive' 'Docker nginx extraction is missing'
 
