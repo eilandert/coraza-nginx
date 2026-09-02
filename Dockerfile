@@ -9,14 +9,18 @@ RUN set -eux; \
     libtool \
     gcc \
     bash \
-    make
+    make \
+    unzip
 
-ARG LIBCORAZA_VERSION=v1.1.0
+ARG LIBCORAZA_VERSION=v1.7.0
+ARG LIBCORAZA_SHA256=c0211b464a14a2bbfdaa0600617316bc908ed0c540dd287514b3f5826b6c6dfc
 
 RUN set -eux; \
-    wget https://github.com/corazawaf/libcoraza/tarball/${LIBCORAZA_VERSION} -O /tmp/libcoraza.tar.gz; \
-    tar -xvf /tmp/libcoraza.tar.gz; \
-    cd *-libcoraza-*; \
+    wget "https://github.com/corazawaf/libcoraza/archive/refs/tags/${LIBCORAZA_VERSION}.zip" -O /tmp/libcoraza.zip; \
+    echo "${LIBCORAZA_SHA256}  /tmp/libcoraza.zip" > /tmp/libcoraza.sha256; \
+    sha256sum -c /tmp/libcoraza.sha256; \
+    unzip -q /tmp/libcoraza.zip; \
+    cd libcoraza-*; \
     ./build.sh; \
     ./configure; \
     make; \
@@ -63,7 +67,7 @@ RUN set -eux; \
     find objs/*.so -print; \
     cp objs/ngx_*.so /usr/lib/nginx/modules
     
-FROM nginx:stable@sha256:146adea4768b83c607d0bdfa4188464e3da6e0a3ad4475db1d1d8f64f27c29cc
+FROM nginx:stable@sha256:146adea4768b83c607d0bdfa4188464e3da6e0a3ad4475db1d1d8f64f27c29cc AS runtime
 
 RUN sed -i -e "s|events {|load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\";\n\nevents {|" /etc/nginx/nginx.conf;
 
@@ -73,15 +77,35 @@ COPY --from=go-builder /usr/local/lib/libcoraza.so /usr/local/lib
 
 RUN ldconfig -v
 
-COPY ./t /tmp/t
+FROM runtime AS test
+
+COPY --from=ngx-coraza /usr/src/coraza-nginx/t /usr/src/coraza-nginx/t
+COPY --from=ngx-coraza /usr/src/coraza-nginx/src /usr/src/coraza-nginx/src
+COPY --from=ngx-coraza /usr/src/coraza-nginx/config /usr/src/coraza-nginx/config
+COPY --from=ngx-coraza /usr/src/coraza-nginx/debian/control /usr/src/coraza-nginx/debian/control
+
+ARG NGINX_TESTS_REF=76bb761cdcaeb6cb024d605c2ef91bf8d8a602d7
+ARG NGINX_TESTS_SHA256=d67d4237799cd3c9509f2555336fed65f3ceb3a6266f8caf71842cac14bb40cd
+
+WORKDIR /usr/src/coraza-nginx
 
 RUN apt-get update -qq && \
-    apt-get install -qq --no-install-recommends curl perl && \
-    curl http://hg.nginx.org/nginx-tests/archive/tip.tar.gz -o tip.tar.gz && \
-    tar xzf tip.tar.gz && \
-    cd nginx-tests-* && \
-    cp /tmp/t/* . && \
-    export TEST_NGINX_BINARY=/usr/sbin/nginx && \
-    export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
-    prove -v coraza*.t 2>&1 || true
+    apt-get install -y -qq --no-install-recommends curl perl && \
+    curl -fL "https://github.com/nginx/nginx-tests/archive/${NGINX_TESTS_REF}.tar.gz" -o nginx-tests.tar.gz && \
+    echo "${NGINX_TESTS_SHA256}  nginx-tests.tar.gz" > nginx-tests.sha256 && \
+    sha256sum -c nginx-tests.sha256 && \
+    mkdir nginx-tests && \
+    tar xzf nginx-tests.tar.gz --strip-components=1 -C nginx-tests && \
+    find t -maxdepth 1 -name 'coraza*.t' ! -name 'coraza-docker-build-contract.t' -exec cp {} nginx-tests \;
 
+WORKDIR /usr/src/coraza-nginx/nginx-tests
+
+RUN export TEST_NGINX_BINARY=/usr/sbin/nginx && \
+    export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
+    prove -v coraza*.t && \
+    touch /tmp/coraza-tests-passed
+
+FROM runtime
+
+COPY --from=test /tmp/coraza-tests-passed /tmp/coraza-tests-passed
+RUN rm /tmp/coraza-tests-passed
