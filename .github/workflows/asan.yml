@@ -132,7 +132,8 @@ jobs:
       - name: Sanitizer soak (60s @ 4 conc)
         env:
           # No valgrind: soak.sh runs the ASan/UBSan-built nginx directly and
-          # fails on any asan* log. The dlopen'd Go libcoraza is uninstrumented;
+          # fails on any asan* or ubsan* log. The dlopen'd Go libcoraza is
+          # uninstrumented;
           # verify_asan_link_order=0 allows ASan to init from the main binary
           # rather than requiring LD_PRELOAD.
           ASAN_OPTIONS: "verify_asan_link_order=0"

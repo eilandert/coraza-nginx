@@ -254,15 +254,8 @@ kill -QUIT "$NGINX_PID" 2>/dev/null || true
 wait "$NGINX_PID" 2>/dev/null; rc=$?
 
 problems=0
-if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
-    echo "FAIL: ASan report:"; cat "$WORK"/logs/asan*; problems=1
-fi
-# UBSan is report-only here (nginx core trips benign init nullability UB that
-# gcc can't scope out) — print for triage, do NOT fail the soak. Real UB in
-# the connector's pure-C paths is gated by the fuzz job instead.
-if ls "$WORK"/logs/ubsan* >/dev/null 2>&1; then
-    echo "note: UBSan diagnostics (non-fatal, mostly nginx-core init noise):"
-    cat "$WORK"/logs/ubsan*
+if ! "$MODULE_DIR/tools/check-sanitizer-reports.sh" "$WORK/logs"; then
+    problems=1
 fi
 if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
     if grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' \
