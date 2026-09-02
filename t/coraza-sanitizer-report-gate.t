@@ -3,9 +3,10 @@
 use strict;
 use warnings;
 use File::Temp qw(tempdir);
+use FindBin;
 use Test::More;
 
-my $checker = 'tools/check-sanitizer-reports.sh';
+my $checker = "$FindBin::Bin/../tools/check-sanitizer-reports.sh";
 my $logs = tempdir(CLEANUP => 1);
 
 is(system('bash', $checker, $logs), 0, 'empty report directory passes');

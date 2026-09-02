@@ -28,10 +28,22 @@ is($docker_tests_ref, $pinned_tests_ref,
 is($docker_tests_sha, $pinned_tests_sha,
     'Docker image verifies the pinned nginx-tests archive');
 
+like($dockerfile,
+    qr/^\s*sha256sum -c \/tmp\/libcoraza\.sha256;\s*\\$/m,
+    'Docker image checks the libcoraza archive digest');
+like($dockerfile,
+    qr/^\s*sha256sum -c nginx-tests\.sha256\s*&&\s*\\$/m,
+    'Docker image checks the nginx-tests archive digest');
 like($dockerfile, qr/^\s*prove -v coraza\*\.t\s*&&\s*\\$/m,
     'Docker build runs the connector test suite');
+like($dockerfile,
+    qr/prove -v coraza\*\.t\s*&&\s*\\\s*\n\s*touch \/tmp\/coraza-tests-passed/,
+    'Docker build creates the success marker only after tests pass');
 unlike($dockerfile, qr/prove -v coraza\*\.t[^\n]*(?:\|\|\s*true|;\s*true)/,
     'Docker build propagates connector test failures');
+like($dockerfile,
+    qr/^COPY --from=test \/tmp\/coraza-tests-passed \/tmp\/coraza-tests-passed$/m,
+    'Final runtime image depends on the passing test stage');
 
 done_testing();
 
