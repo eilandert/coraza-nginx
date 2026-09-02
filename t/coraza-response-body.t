@@ -21,7 +21,14 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http/);
+my $root = "$FindBin::Bin/..";
+my $src = slurp("$root/src/ngx_http_coraza_body_filter.c");
+my ($eof_block) = $src =~ /(if\s*\(n\s*==\s*0\)\s*\{.*?^\s*\})/ms;
+my $t = Test::Nginx->new()->has(qw/http/)->plan(4);
+
+like($eof_block // '',
+    qr/response body file ended.*?return NGX_ERROR;/s,
+    'premature EOF in a file-backed response fails closed');
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -74,8 +81,6 @@ $t->write_file("/body_access_off", $large_body);
 
 $t->run();
 $t->todo_alerts();
-$t->plan(3);
-
 ###############################################################################
 
 like(http_get('/body1'), qr/^HTTP.*403/, 'response body (block)');
@@ -84,3 +89,12 @@ my $r = http_get('/body_access_off');
 like($r, qr/^HTTP.*200/, 'large response with SecResponseBodyAccess Off returns 200');
 like($r, qr/\Q$large_body\E/, 'large response body delivered intact');
 
+###############################################################################
+
+sub slurp {
+    my ($path) = @_;
+
+    open my $fh, '<', $path or die "open $path: $!";
+    local $/ = undef;
+    return <$fh>;
+}
