@@ -121,6 +121,9 @@ ngx_http_coraza_append_response_body_file(ngx_http_coraza_ctx_t *ctx,
     size_t     size;
     ssize_t    n;
     ngx_int_t  rc;
+#if (NGX_HAVE_ALIGNED_DIRECTIO)
+    ngx_uint_t directio_disabled;
+#endif
 
     if (buf->file_last < buf->file_pos) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -142,6 +145,21 @@ ngx_http_coraza_append_response_body_file(ngx_http_coraza_ctx_t *ctx,
 
     offset = buf->file_pos;
     rc = NGX_OK;
+
+#if (NGX_HAVE_ALIGNED_DIRECTIO)
+    directio_disabled = 0;
+
+    if (buf->file->directio) {
+        if (ngx_directio_off(buf->file->fd) == NGX_FILE_ERROR) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                ngx_directio_off_n " \"%s\" failed", buf->file->name.data);
+            rc = NGX_ERROR;
+            goto done;
+        }
+
+        directio_disabled = 1;
+    }
+#endif
 
     while (offset < buf->file_last) {
         if (buf->file_last - offset
@@ -181,6 +199,23 @@ ngx_http_coraza_append_response_body_file(ngx_http_coraza_ctx_t *ctx,
 
         offset += n;
     }
+
+#if (NGX_HAVE_ALIGNED_DIRECTIO)
+done:
+
+    if (directio_disabled) {
+        ngx_err_t  err;
+
+        err = ngx_errno;
+
+        if (ngx_directio_on(buf->file->fd) == NGX_FILE_ERROR) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
+                ngx_directio_on_n " \"%s\" failed", buf->file->name.data);
+        }
+
+        ngx_set_errno(err);
+    }
+#endif
 
     ngx_free(data);
 

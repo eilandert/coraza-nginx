@@ -62,6 +62,7 @@ http {
 
         location /body_file_clean {
             default_type text/plain;
+            directio 512;
             coraza_rules '
                 SecRuleEngine On
                 SecResponseBodyAccess On
@@ -72,6 +73,7 @@ http {
 
         location /body_file_block {
             default_type text/plain;
+            directio 512;
             coraza_rules '
                 SecRuleEngine On
                 SecResponseBodyAccess On

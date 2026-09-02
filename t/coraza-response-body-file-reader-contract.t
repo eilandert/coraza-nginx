@@ -24,6 +24,10 @@ like($body_filter,
     'one scratch buffer is reused and released across file chunks');
 
 like($body_filter,
+    qr/if \(buf->file->directio\).*?ngx_directio_off\(buf->file->fd\).*?while \(offset < buf->file_last\).*?ngx_read_file\(buf->file, data, size, offset\).*?if \(directio_disabled\).*?ngx_directio_on\(buf->file->fd\)/s,
+    'direct I/O is disabled around reads into the reusable scratch buffer');
+
+like($body_filter,
     qr/if \(!ngx_buf_in_memory\(chain->buf\).*?ngx_http_coraza_append_response_body_file\(ctx, r,\s*chain->buf\)/s,
     'file-backed response buffers use the bounded reader');
 
