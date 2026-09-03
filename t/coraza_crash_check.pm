@@ -33,16 +33,76 @@ use Test::More;
 
 # Matches what the three original crash-checking tests looked for
 # (coraza-empty-header-value.t, coraza-request-body-chunked.t,
-# coraza-deleted-headers.t), widened slightly to catch an nginx [emerg]
-# worker-exited-on-signal log line too.
-our $CRASH_RE = qr/\[emerg\].*signal|signal 11|SIGSEGV|SIGABRT|SIGBUS|AddressSanitizer/;
+# coraza-deleted-headers.t), widened to every way a dead worker shows up in
+# error.log:
+#   * the master's "[alert] worker process N exited on signal S" for ANY
+#     signal, not just 11 -- a Go panic inside libcoraza (cgo) aborts the
+#     worker with signal 6, and SIGBUS/SIGILL are just as fatal;
+#   * "exited with fatal code" (ngx_worker_process_exit on a fatal error);
+#   * the sanitizer report headers (ASan/UBSan/LSan, plus UBSan's bare
+#     "runtime error:" lines) -- nginx redirects the worker's stderr into
+#     error.log, so these land there too;
+#   * Go runtime crash banners ("panic:", "fatal error:") from libcoraza,
+#     which reach error.log the same way before the worker dies.
+# NOTE: /x strips literal whitespace from the pattern, so every space in a
+# multi-word alternative MUST be written as \s (or the alternative silently
+# becomes an unmatchable run-together token such as "exitedonsignal").
+our $CRASH_RE = qr/exited\son\ssignal|exited\swith\sfatal\scode
+	|SIGSEGV|SIGABRT|SIGBUS|AddressSanitizer|UndefinedBehaviorSanitizer
+	|LeakSanitizer|runtime\serror:|^panic:\s|^fatal\serror:\s/mx;
+
+# Hard ceiling, in seconds, on the whole shutdown.  Test::Nginx::stop() polls
+# for the master with WNOHANG for 90s, then falls through to a BLOCKING
+# waitpid($pid, 0) with no timeout at all -- so a master that will not exit
+# wedges the file, and with it the entire prove run, forever.  Bounding it
+# here converts that class of failure into a loud test failure instead of a
+# CI slot burned to its 6-hour limit.
+our $SHUTDOWN_TIMEOUT = 60;
 
 sub assert_no_crash {
 	my ($t, $name) = @_;
 
 	$name = 'no worker crash in error.log' unless defined $name;
 
-	$t->stop();
+	# Order matters.  Test::Nginx::DESTROY tears down in the order
+	# stop() then stop_daemons(), but "nginx -s quit" is a GRACEFUL
+	# shutdown: a worker holding a live upstream connection will not
+	# exit while that connection is still being written to.  A test whose
+	# backend daemon streams forever (coraza-sse.t) therefore keeps the
+	# worker alive, stop() exhausts its 90s poll, and the unbounded
+	# waitpid() behind it blocks for good.  Reaping the daemons FIRST
+	# closes the upstream side, so the graceful quit can actually finish.
+	$t->stop_daemons();
+
+	my $wedged;
+	eval {
+		local $SIG{ALRM} = sub { die "shutdown timeout\n" };
+		alarm($SHUTDOWN_TIMEOUT);
+		$t->stop();
+		alarm(0);
+		1;
+	} or do {
+		alarm(0);
+		$wedged = $@;
+	};
+
+	if (defined $wedged) {
+		# Kill the master outright and clear _started, otherwise
+		# Test::Nginx::DESTROY calls the very same unbounded stop()
+		# again at process exit and re-wedges the run after the plan
+		# has already been satisfied.
+		my $pid = eval { $t->read_file('nginx.pid') };
+		if (defined $pid && $pid =~ /^\s*(\d+)/) {
+			kill 'KILL', $1;
+			waitpid($1, 0);
+		}
+		$t->{_started} = 0;
+
+		fail($name);
+		diag("nginx did not shut down within "
+			. "${SHUTDOWN_TIMEOUT}s: $wedged");
+		return;
+	}
 
 	unlike($t->read_file('error.log'), $CRASH_RE, $name);
 }

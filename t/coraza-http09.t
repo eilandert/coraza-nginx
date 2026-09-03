@@ -61,7 +61,7 @@ EOF
 
 $t->run();
 $t->todo_alerts();
-$t->plan(3);
+$t->plan(4);
 
 ###############################################################################
 
@@ -70,13 +70,19 @@ $t->plan(3);
 my $clean = http("GET /foo\r\n");
 like($clean, qr/clean/, 'HTTP/0.9 clean request served');
 
-# 0.9 request that should still be inspected and blocked. HTTP/0.9 has no
-# status line, so a blocked request cannot carry a 403 -- nginx just closes
-# the connection without writing the location's body. Assert that positively
-# (empty response) rather than merely "does not contain 'clean'", which a
-# crashed worker's empty/garbled response would also satisfy.
+# 0.9 request that should still be inspected and blocked. An HTTP/0.9
+# response carries no status line, so the 403 is only observable as the body
+# nginx writes for it: its 403 error page, in place of the location's own
+# "clean" body. Assert that page positively rather than merely "does not
+# contain 'clean'" -- a crashed worker's empty or garbled response would
+# satisfy the negative check just as well, which is exactly the silent pass
+# this file is meant to rule out.
 my $bad = http("GET /attack\r\n");
-is($bad, '', 'HTTP/0.9 attacking request is blocked (connection closed, no body)');
+like($bad, qr/403 Forbidden/,
+	'HTTP/0.9 attacking request is blocked (403 error page body, '
+	. 'not the location body)');
+unlike($bad, qr/clean/,
+	'HTTP/0.9 attacking request does not get the clean body');
 
 coraza_crash_check::assert_no_crash($t,
 	'no worker crash in error.log');

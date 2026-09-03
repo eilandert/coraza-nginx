@@ -22,9 +22,22 @@
 # up to the cap" connector apart from one that stopped inspecting on the
 # first delayed buffer. Two more locations close that gap with
 # SecResponseBodyAccess On:
-#   * /before-cap places the matching marker in the first few bytes, well
-#     under the cap -- deny must still fire and 403, proving buffered
-#     content is genuinely inspected while delayed, not just passed through.
+#   * /before-cap serves a body that stays wholly under the cap with the
+#     matching marker in its first bytes -- deny must still fire and 403,
+#     proving buffered content is genuinely inspected while delayed, not
+#     just passed through.
+# Both new locations must set two directives explicitly or they prove
+# nothing:
+#   * SecResponseBodyMimeType application/octet-stream -- Coraza inspects a
+#     response body only when its Content-Type is in that list, and the
+#     default list does not contain application/octet-stream, so without it
+#     neither rule below ever sees a byte.
+#   * SecResponseBodyLimit 4194304 -- Coraza's own response-body limit
+#     (512 KiB, ProcessPartial by default) would truncate inspection well
+#     before the connector's 1 MiB delayed-body cap, so the pair would
+#     measure Coraza's limit rather than the cap. Raised past the cap, the
+#     connector flush is the only thing that can stop inspection.
+#
 #   * /after-cap places the marker only past the 1 MiB cap. Once flushed,
 #     content is streamed straight to the client and is no longer collected
 #     for inspection, so the rule must NOT fire: the response completes
@@ -86,6 +99,8 @@ http {
             coraza_rules '
                 SecRuleEngine On
                 SecResponseBodyAccess On
+                SecResponseBodyMimeType application/octet-stream
+                SecResponseBodyLimit 4194304
                 SecRule RESPONSE_BODY "@contains EARLY-MARKER" "id:451,phase:4,deny,log,status:403"
             ';
         }
@@ -95,6 +110,8 @@ http {
             coraza_rules '
                 SecRuleEngine On
                 SecResponseBodyAccess On
+                SecResponseBodyMimeType application/octet-stream
+                SecResponseBodyLimit 4194304
                 SecRule RESPONSE_BODY "@contains LATE-MARKER" "id:452,phase:4,deny,log,status:403"
             ';
         }
@@ -107,9 +124,13 @@ EOF
 my $size = 4 * 1024 * 1024;
 $t->write_file("/big", "Z" x $size);
 
-# Marker in the first bytes: well inside the 1 MiB cap, so it must still be
-# seen and blocked before any flush happens.
-$t->write_file("/before-cap", "EARLY-MARKER" . ("Y" x $size));
+# Marker in the first bytes of a body that stays entirely under the 1 MiB
+# cap, so the whole response is still buffered when phase 4 runs and the deny
+# can still produce a clean 403. The body must be under the cap, not merely
+# the marker: once total pending bytes cross the cap the connector flushes
+# the headers and a later deny can no longer change the status, whatever the
+# marker position was.
+$t->write_file("/before-cap", "EARLY-MARKER" . ("Y" x (512 * 1024)));
 
 # Marker placed only after the 1 MiB cap: by the time these bytes arrive the
 # connector has already flushed and stopped collecting, so it must NOT be
@@ -145,9 +166,14 @@ like($r_early, qr/^HTTP.*403/,
 my $r_late = http_get('/after-cap');
 like($r_late, qr/^HTTP.*200/,
     'rule match placed only after the buffering cap is not seen (inspection truncates, not a silent full pass)');
-my ($late_body) = $r_late =~ /\r\n\r\n(.*)$/s;
-like($late_body // '', qr/LATE-MARKER/,
-    'the un-inspected marker still reaches the client, confirming the body was streamed through rather than dropped');
+# http_get() returns only what the first reads delivered, which for a body
+# this size is a prefix rather than the whole response, so assert the length
+# nginx announced instead of hunting the marker in a truncated buffer: a
+# Content-Length covering the padding plus the marker proves the streamed
+# response still carries it.
+like($r_late, qr/Content-Length: @{[ $pad + length 'LATE-MARKER' ]}\r\n/,
+    'the un-inspected marker is still part of the response the client is '
+    . 'sent, confirming the body was streamed through rather than dropped');
 
 $t->stop();
 like($t->read_file('cap.log'), qr/flushing headers early/,

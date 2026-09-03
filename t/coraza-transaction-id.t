@@ -24,7 +24,10 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->plan(7)->write_file_expand('nginx.conf', <<'EOF');
+# plan() counts only this file's own assertions -- Test::Nginx adds its two
+# teardown checks ("no alerts" / "no sanitizer errors") to the plan itself.
+# Seven named checks below plus assert_no_crash()'s one makes eight.
+my $t = Test::Nginx->new()->plan(8)->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
 
