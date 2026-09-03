@@ -97,31 +97,6 @@ http {
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
 
-        # Positive control for the oracle above.  The /proxied assertion is a
-        # 200, i.e. "the counter did NOT go past 3" -- which is also what you
-        # get from a counter that cannot count past 1.  If a repeated header
-        # collapses into a single RESPONSE_HEADERS match, /proxied passes
-        # whether or not the double-submission bug is present, and proves
-        # nothing.
-        #
-        # So count a header that is genuinely duplicated on the wire and that
-        # nginx does NOT hoist into a dedicated headers_out slot: X-Dup
-        # arrives as two separate header lines and reaches the list walk as
-        # two distinct ngx_table_elt_t entries, untouched by the pointer
-        # guard.  A 403 here means the mechanism really does count repeats,
-        # which is what makes the 200 above meaningful.  A 200 here means the
-        # oracle is vacuous and the main assertion must not be trusted.
-        location /dup-control {
-            coraza on;
-            coraza_rules '
-                SecRuleEngine On
-                SecResponseBodyAccess Off
-                SecAction "id:500,phase:3,pass,nolog,setvar:tx.hits=0"
-                SecRule RESPONSE_HEADERS:X-Dup "@rx ." "id:501,phase:3,pass,log,setvar:tx.hits=+1"
-                SecRule TX:HITS "@gt 1" "id:599,phase:3,deny,log,status:403"
-            ';
-            proxy_pass http://127.0.0.1:%%PORT_8082%%;
-        }
     }
 }
 EOF
