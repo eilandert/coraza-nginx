@@ -105,6 +105,39 @@ ngx_http_coraza_read_body_data(ngx_http_request_t *r, ngx_buf_t *buf,
 }
 
 
+/*
+ * Terminate the response with `status` from inside the body filter.
+ *
+ * Both the delayed-header and the streaming path end here.  Returning a bare
+ * status code from a body filter is NOT a finalize: nginx propagates it up
+ * through ngx_http_output_filter() and no header is ever written, so on the
+ * delayed path -- where by construction nothing has been sent yet -- the
+ * client would see a truncated response or a reset instead of the clean error
+ * page the delay mechanism exists to provide.  ngx_http_filter_finalize_request()
+ * runs ngx_http_clean_header() + ngx_http_special_response_handler() and
+ * actually produces that page.
+ *
+ * The caller has already set ctx->intervention_triggered, so the re-run of the
+ * header filter that the finalize triggers early-returns instead of
+ * re-inspecting the (now discarded) original headers.  The buffered
+ * pending_chain describes the response we are replacing and must be dropped;
+ * its buffers live in r->pool and are released with the request.
+ */
+static ngx_int_t
+ngx_http_coraza_body_filter_finalize(ngx_http_request_t *r,
+    ngx_http_coraza_ctx_t *ctx, ngx_int_t status)
+{
+    if (ctx->headers_delayed) {
+        ctx->headers_delayed    = 0;
+        ctx->pending_chain      = NULL;
+        ctx->pending_chain_last = &ctx->pending_chain;
+        ctx->pending_bytes      = 0;
+    }
+
+    return ngx_http_filter_finalize_request(r, &ngx_http_coraza_module, status);
+}
+
+
 ngx_int_t
 ngx_http_coraza_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
@@ -202,12 +235,7 @@ ngx_http_coraza_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
                         "coraza: failed to append response body chunk "
                         "for inspection");
                     ctx->intervention_triggered = 1;
-                    if (ctx->headers_delayed) {
-                        ctx->headers_delayed = 0;
-                        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-                    }
-                    return ngx_http_filter_finalize_request(r,
-                        &ngx_http_coraza_module,
+                    return ngx_http_coraza_body_filter_finalize(r, ctx,
                         NGX_HTTP_INTERNAL_SERVER_ERROR);
                 }
             }
@@ -215,20 +243,11 @@ ngx_http_coraza_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             ret = ngx_http_coraza_process_intervention(ctx, r, 0);
             if (ret > 0) {
                 ctx->intervention_triggered = 1;
-                if (ctx->headers_delayed) {
-                    ctx->headers_delayed = 0;
-                    return ret;
-                }
-                return ngx_http_filter_finalize_request(r,
-                    &ngx_http_coraza_module, ret);
+                return ngx_http_coraza_body_filter_finalize(r, ctx, ret);
             } else if (ret < 0) {
                 ctx->intervention_triggered = 1;
-                if (ctx->headers_delayed) {
-                    ctx->headers_delayed = 0;
-                    return NGX_HTTP_INTERNAL_SERVER_ERROR;
-                }
-                return ngx_http_filter_finalize_request(r,
-                    &ngx_http_coraza_module, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                return ngx_http_coraza_body_filter_finalize(r, ctx,
+                    NGX_HTTP_INTERNAL_SERVER_ERROR);
             }
         }
 
@@ -259,33 +278,20 @@ ngx_http_coraza_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
                  */
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                     "coraza: response body phase processing failed");
-                if (ctx->headers_delayed) {
-                    ctx->intervention_triggered = 1;
-                    ctx->headers_delayed = 0;
-                    return NGX_HTTP_INTERNAL_SERVER_ERROR;
-                }
-                return ngx_http_filter_finalize_request(r,
-                    &ngx_http_coraza_module, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                ctx->intervention_triggered = 1;
+                return ngx_http_coraza_body_filter_finalize(r, ctx,
+                    NGX_HTTP_INTERNAL_SERVER_ERROR);
             }
 
             ret = ngx_http_coraza_poll_after_process(ctx, r, 0, pret);
             if (ret > 0) {
                 ctx->intervention_triggered = 1;
-                if (ctx->headers_delayed) {
-                    ctx->headers_delayed = 0;
-                    return ret;
-                }
-                return ngx_http_filter_finalize_request(r,
-                    &ngx_http_coraza_module, ret);
+                return ngx_http_coraza_body_filter_finalize(r, ctx, ret);
             }
             else if (ret < 0) {
                 ctx->intervention_triggered = 1;
-                if (ctx->headers_delayed) {
-                    ctx->headers_delayed = 0;
-                    return NGX_HTTP_INTERNAL_SERVER_ERROR;
-                }
-                return ngx_http_filter_finalize_request(r,
-                    &ngx_http_coraza_module, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                return ngx_http_coraza_body_filter_finalize(r, ctx,
+                    NGX_HTTP_INTERNAL_SERVER_ERROR);
             }
         }
 
