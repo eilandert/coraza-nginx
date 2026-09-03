@@ -42,7 +42,7 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(22);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(34);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -190,14 +190,21 @@ is(origin_saw('short'), 0,
 # is reused directly here -- no second config/reload needed. Neither nginx
 # nor the connector decodes response content codings, so an origin response
 # advertising a chain nginx/coraza cannot decode (gzip+br stacked, or an
-# unknown token) is passed through as opaque bytes: a 200 on both sides, no
-# hang, and no error status invented on the way.
+# unknown token) is passed through as opaque bytes. A 200 alone would not
+# prove that: a regression that stripped the Content-Encoding header or
+# rewrote the body would still return one. Each case therefore also asserts
+# that the header arrives with its exact value and that the payload arrives
+# byte for byte.
 
 for my $enc ('gzip,br', 'unknown-codec', 'identity,gzip,unknown') {
 	for my $loc (qw(off on)) {
 		my $r = stacked_encoding_request($loc, $enc);
 		like($r, qr!^HTTP/1\.1 200!,
 			"stacked/unknown Content-Encoding '$enc' passes through undecoded, no hang ($loc)");
+		like($r, qr!\r\nContent-Encoding:\s*\Q$enc\E\r\n!i,
+			"Content-Encoding '$enc' reaches the client unchanged ($loc)");
+		like($r, qr!\r\n\r\npayload\z!,
+			"the opaque encoded payload reaches the client unchanged ($loc)");
 	}
 }
 
