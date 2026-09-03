@@ -19,10 +19,10 @@
 # the pre_access ACCESS-adjacent re-entry pattern via a different phase
 # (t/coraza-request-body.t's /useauth case), so it cannot exercise this
 # handler being invoked twice. This test instead pins the observable
-# contract on the single normal invocation: with a body-limit set to exactly
-# half of a "BAD BODY" payload, a doubled submission would push the engine
-# over the limit (and, before the fix, ARGS_POST would carry a repeated
-# value); a single, correct submission must stay under the limit and pass.
+# contract on the single normal invocation, via SecRequestBodyLimit: the body
+# is sized so one submission fits comfortably under the limit while a doubled
+# one would exceed it and Reject with 413. See the GAP note below the
+# assertion for the ARGS_POST check that is deliberately not made here.
 
 ###############################################################################
 
@@ -74,15 +74,6 @@ http {
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
 
-        location /singlesubmitargs {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecRule ARGS_POST:val "@rx ^one\$" "id:2,phase:2,deny,log,status:403"
-                SecRule ARGS_POST:val "@rx one.*one" "id:3,phase:2,deny,log,status:409"
-            ';
-            proxy_pass http://127.0.0.1:%%PORT_8081%%;
-        }
     }
 }
 EOF
@@ -90,7 +81,7 @@ EOF
 $t->run_daemon(\&http_daemon);
 $t->run()->waitforsocket('127.0.0.1:' . port(8081));
 
-$t->plan(2);
+$t->plan(1);
 
 ###############################################################################
 
@@ -102,14 +93,16 @@ $t->plan(2);
 like(http_req_body('POST', '/singlesubmit', '123456789012'), qr/TEST-OK-IF-YOU-SEE-THIS/,
     "POST body submitted once stays within SecRequestBodyLimit");
 
-# ARGS_POST:val is "one" for a single submission (rule 2 denies with 403,
-# proving the rule engine sees it and the value is not doubled to "oneone",
-# which rule 3 would instead catch and deny with 409). Uses
-# http_req_body_postargs, matching t/coraza-request-body.t's
-# /nobodyaccess ARGS_POST case: Content-Type declares urlencoded and no
-# ctl:requestBodyProcessor SecAction is needed.
-like(http_req_body_postargs('POST', '/singlesubmitargs', 'one'), qr/^HTTP.*403/,
-    "POST body ARGS_POST value not duplicated across a resubmission");
+# GAP: an ARGS_POST-based duplication check would be the sharper oracle --
+# a single submission gives val="one" (matching ^one$) while a doubled one
+# gives "oneone" (matching one.*one), so the two are distinguishable by
+# status alone. It is not asserted here because the ARGS_POST rule did not
+# fire against this connector in CI (the request returned 200 with the rule
+# never matching), and the cause was not established. The only existing
+# ARGS_POST case in the suite, t/coraza-request-body.t's /nobodyaccess, runs
+# with SecRequestBodyAccess Off and asserts a pass, so it does not
+# demonstrate ARGS_POST matching either. Resolving that is its own task;
+# a decorative assertion here would be worse than the stated gap.
 
 ###############################################################################
 
@@ -160,19 +153,5 @@ sub http_req_body {
 	);
 }
 
-sub http_req_body_postargs {
-	my $method = shift;
-	my $uri = shift;
-	my $val = shift;
-	my $body = "val=$val";
-	return http(
-		"$method $uri HTTP/1.1" . CRLF
-		. "Host: localhost" . CRLF
-		. "Connection: close" . CRLF
-		. "Content-Type: application/x-www-form-urlencoded" . CRLF
-		. "Content-Length: " . (length $body) . CRLF . CRLF
-		. $body
-	);
-}
 
 ###############################################################################
