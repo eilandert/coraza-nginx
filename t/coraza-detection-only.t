@@ -82,7 +82,7 @@ http {
                 SecRuleEngine DetectionOnly
                 SecRule ARGS:x "@streq bad" "id:51,phase:1,deny,status:403,log,auditlog,msg:\'detectiononly-probe\'"
                 SecAuditEngine On
-                SecAuditLogParts ABZ
+                SecAuditLogParts ABEZ
                 SecAuditLog %%TESTDIR%%/auditlog-detect.txt
                 SecAuditLogType Serial
             ';
