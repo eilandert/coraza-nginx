@@ -206,7 +206,7 @@ like(http_get_healthy(), qr/HEALTHY-OK/,
     print $s "POST /body HTTP/1.1" . CRLF
         . "Host: localhost" . CRLF
         . "Content-Type: application/x-www-form-urlencoded" . CRLF
-        . "Content-Length: 20" . CRLF . CRLF
+        . "Content-Length: 17" . CRLF . CRLF
         . "x=abc";
 
     select undef, undef, undef, 0.2;
@@ -387,11 +387,27 @@ sub slow_daemon {
 
         my ($uri) = $request =~ /^\S+\s+(\S+)/;
 
+        my $headers = $request;
         while (<$client>) {
+            $headers .= $_;
             last if (/^\x0d?\x0a?$/);
         }
 
         if (defined $uri && $uri =~ m{^/body}) {
+            # Drain the forwarded request body before responding so nginx's
+            # upstream write completes; otherwise the proxy round-trip races
+            # on an unread socket (see coraza-request-body-deferred.t).
+            if ($headers =~ /Content-Length:\s*(\d+)/i) {
+                my $need = $1;
+                my $got = 0;
+                while ($got < $need) {
+                    my $buf;
+                    my $n = read($client, $buf, $need - $got);
+                    last if !defined $n || $n == 0;
+                    $got += $n;
+                }
+            }
+
             print $client "HTTP/1.1 200 OK" . CRLF;
             print $client "Content-Length: 7" . CRLF;
             print $client "Connection: close" . CRLF . CRLF;
