@@ -79,7 +79,7 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080;
+        listen       127.0.0.1:%%PORT_8080%%;
         server_name  localhost;
 
         coraza on;
@@ -178,15 +178,24 @@ like(http_get_healthy(), qr/HEALTHY-OK/,
     ) or die "Can't connect to nginx: $!\n";
     $s->autoflush(1);
 
-    print $s "GET /slow-response?q=observe HTTP/1.1" . CRLF
+    print $s "GET /slow-response?q=observe&id=cancel HTTP/1.1" . CRLF
         . "Host: localhost" . CRLF
         . "Connection: close" . CRLF . CRLF;
 
     # Deterministic sync: the daemon writes a marker once it is blocked
     # holding the response body back, i.e. the coraza transaction is
     # definitely alive and mid response-phase server-side, before we cancel.
-    wait_for_marker('slow-response-holding');
+    wait_for_marker('slow-response-holding-cancel');
     close $s;
+
+    # The daemon is single-threaded and still blocked on this request's
+    # release marker. Release it now and wait until it has finished the
+    # iteration, so the /healthy probe and every later case talk to an idle
+    # daemon instead of queueing behind an eight-second wait, and so no
+    # marker from this case can satisfy a later case's wait. Marker names
+    # carry the request's id= query parameter for the same reason.
+    release_marker('slow-response-release-cancel');
+    wait_for_marker('slow-response-done-cancel');
 }
 
 like(http_get_healthy(), qr/HEALTHY-OK/,
@@ -242,16 +251,16 @@ like(http_get_healthy(), qr/HEALTHY-OK/,
     ) or die "Can't connect to nginx: $!\n";
     $s->autoflush(1);
 
-    print $s "GET /slow-response?q=observe HTTP/1.1" . CRLF
+    print $s "GET /slow-response?q=observe&id=reload HTTP/1.1" . CRLF
         . "Host: localhost" . CRLF
         . "Connection: close" . CRLF . CRLF;
 
-    wait_for_marker('slow-response-holding');
+    wait_for_marker('slow-response-holding-reload');
 
     $t->reload();
     select undef, undef, undef, 0.5;
 
-    release_marker('slow-response-release');
+    release_marker('slow-response-release-reload');
 
     local $SIG{ALRM} = sub { die "timeout\n" };
     my $reply = '';
@@ -363,9 +372,12 @@ sub release_marker {
 
 # A slow upstream: sends response headers immediately, then blocks holding the
 # body back (writing a "holding" marker as soon as it starts blocking) until
-# the "release" marker file appears, then finishes the body.  Used for
-# /slow-response, which delays forwarding headers to the client behind a
-# phase-4 rule -- the client sees nothing until the marker is released.
+# the "release" marker file appears, then finishes the body and writes a
+# "done" marker.  Used for /slow-response, which delays forwarding headers to
+# the client behind a phase-4 rule -- the client sees nothing until the
+# marker is released.  Every marker name carries the request's id= query
+# parameter so two /slow-response cases can never satisfy each other's
+# waits.
 sub slow_daemon {
     my $server = IO::Socket::INET->new(
         Proto => 'tcp',
@@ -386,6 +398,7 @@ sub slow_daemon {
         }
 
         my ($uri) = $request =~ /^\S+\s+(\S+)/;
+        my ($id) = (defined $uri && $uri =~ /[?&]id=(\w+)/) ? $1 : 'none';
 
         my $headers = $request;
         while (<$client>) {
@@ -420,12 +433,12 @@ sub slow_daemon {
             . "Content-Length: 14\r\n"
             . "Content-Type: text/plain\r\n\r\n";
 
-        open my $fh, '>', "$testdir/slow-response-holding"
+        open my $fh, '>', "$testdir/slow-response-holding-$id"
             or die "Can't write holding marker: $!\n";
         print $fh "holding\n";
         close $fh;
 
-        my $release = "$testdir/slow-response-release";
+        my $release = "$testdir/slow-response-release-$id";
         for (1 .. 800) {
             last if -e $release;
             select undef, undef, undef, 0.01;
@@ -433,6 +446,11 @@ sub slow_daemon {
 
         print $client "SLOW-BODY-DONE";
         close $client;
+
+        open $fh, '>', "$testdir/slow-response-done-$id"
+            or die "Can't write done marker: $!\n";
+        print $fh "done\n";
+        close $fh;
     }
 }
 
