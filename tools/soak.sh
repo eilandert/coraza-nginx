@@ -257,12 +257,17 @@ problems=0
 if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
     echo "FAIL: ASan report:"; cat "$WORK"/logs/asan*; problems=1
 fi
-# UBSan is report-only here (nginx core trips benign init nullability UB that
-# gcc can't scope out) — print for triage, do NOT fail the soak. Real UB in
-# the connector's pure-C paths is gated by the fuzz job instead.
+# UBSan noise from nginx core / third-party init (benign nullability trips
+# gcc can't scope out) is print-only. A report whose stack names OUR src/
+# is real UB in the connector's pure-C paths and fails the soak — the fuzz
+# job also gates those paths, but the soak drives the live-nginx call sites
+# the fuzzer can't reach.
 if ls "$WORK"/logs/ubsan* >/dev/null 2>&1; then
-    echo "note: UBSan diagnostics (non-fatal, mostly nginx-core init noise):"
+    echo "note: UBSan diagnostics:"
     cat "$WORK"/logs/ubsan*
+    if grep -qE '(^|[[:space:]/])src/ngx_http_coraza_' "$WORK"/logs/ubsan*; then
+        echo "FAIL: UBSan report naming our src/ (see above)"; problems=1
+    fi
 fi
 if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
     if grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' \
