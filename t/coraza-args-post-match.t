@@ -51,29 +51,90 @@ http {
 
         coraza on;
 
-        location /argspost {
+        # PROBE MATRIX (temporary, discriminating): each location differs in
+        # exactly one dimension so the CI result isolates the cause.
+        location /p_body {
             coraza_rules '
                 SecRuleEngine On
                 SecRequestBodyAccess On
-                SecRule ARGS_POST:val "@rx ^one$" "id:51,phase:2,deny,log,status:403"
+                SecRule REQUEST_BODY "@rx one" "id:61,phase:2,deny,log,status:403"
             ';
             return 200 "TEST-OK-IF-YOU-SEE-THIS";
         }
+
+        location /p_argspost {
+            coraza_rules '
+                SecRuleEngine On
+                SecRequestBodyAccess On
+                SecRule ARGS_POST:val "@rx ^one$" "id:62,phase:2,deny,log,status:403"
+            ';
+            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+        }
+
+        location /p_argspost_ctl {
+            coraza_rules '
+                SecRuleEngine On
+                SecRequestBodyAccess On
+                SecAction "id:2,phase:1,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
+                SecRule ARGS_POST:val "@rx ^one$" "id:63,phase:2,deny,log,status:403"
+            ';
+            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+        }
+
+        location /p_args {
+            coraza_rules '
+                SecRuleEngine On
+                SecRequestBodyAccess On
+                SecRule ARGS:val "@rx ^one$" "id:64,phase:2,deny,log,status:403"
+            ';
+            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+        }
+
+        location /p_rbp {
+            coraza_rules '
+                SecRuleEngine On
+                SecRequestBodyAccess On
+                SecRule REQBODY_PROCESSOR "@rx ." "id:65,phase:2,deny,log,status:403"
+            ';
+            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+        }
+
+        location /p_ct {
+            coraza_rules '
+                SecRuleEngine On
+                SecRequestBodyAccess On
+                SecRule REQUEST_HEADERS:Content-Type "@rx urlencoded" "id:66,phase:2,deny,log,status:403"
+            ';
+            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+        }
+
     }
 }
 EOF
 
 $t->run()->waitforsocket('127.0.0.1:' . port(8080));
 
-$t->plan(2);
+$t->plan(6);
 
 ###############################################################################
 
-like(http_post_form('/argspost', 'val=one'), qr/^HTTP.*403/,
-    'ARGS_POST:val matches a well-formed urlencoded pair and blocks');
+like(http_post_form('/p_body', 'val=one'), qr/^HTTP.*403/,
+    'PROBE REQUEST_BODY matches raw body');
 
-like(http_post_form('/argspost', 'val=two'), qr/TEST-OK-IF-YOU-SEE-THIS/,
-    'ARGS_POST:val benign control (non-matching value) passes');
+like(http_post_form('/p_argspost', 'val=one'), qr/^HTTP.*403/,
+    'PROBE ARGS_POST without ctl');
+
+like(http_post_form('/p_argspost_ctl', 'val=one'), qr/^HTTP.*403/,
+    'PROBE ARGS_POST with explicit ctl:requestBodyProcessor=URLENCODED');
+
+like(http_post_form('/p_args', 'val=one'), qr/^HTTP.*403/,
+    'PROBE ARGS (combined) matches');
+
+like(http_post_form('/p_rbp', 'val=one'), qr/^HTTP.*403/,
+    'PROBE REQBODY_PROCESSOR is non-empty');
+
+like(http_post_form('/p_ct', 'val=one'), qr/^HTTP.*403/,
+    'PROBE Content-Type header reached the engine');
 
 ###############################################################################
 
