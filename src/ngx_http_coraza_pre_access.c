@@ -172,6 +172,13 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
 
         if (offset < body_size) {
             ret = ngx_http_coraza_process_intervention(ctx, r, 0);
+            /*
+             * If nginx has already started streaming the error page body
+             * after a prior intervention, do not attempt another finalize.
+             */
+            if (r->error_page) {
+                goto free;
+            }
             if (ret < 0) {
                 rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
                 goto free;
@@ -366,6 +373,13 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
 
             /* Check for intervention after each chunk for prompt detection */
             ret = ngx_http_coraza_process_intervention(ctx, r, 0);
+            /*
+             * If nginx has already started streaming the error page body
+             * after a prior intervention, do not attempt another finalize.
+             */
+            if (r->error_page) {
+                return NGX_DECLINED;
+            }
             if (ret < 0) {
                 /* NGX_ERROR from the intervention handler: fail closed. */
                 ctx->intervention_triggered = 1;
