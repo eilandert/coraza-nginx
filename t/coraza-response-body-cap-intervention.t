@@ -18,6 +18,9 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 
+use lib '.';
+use coraza_crash_check;
+
 ###############################################################################
 
 select STDERR; $| = 1;
@@ -63,7 +66,7 @@ $t->write_file('/late-limit', 'L' x $size);
 
 $t->run();
 $t->todo_alerts();
-$t->plan(4);
+$t->plan(5);
 
 ###############################################################################
 
@@ -79,3 +82,6 @@ isnt(length($body // ''), $size,
 $t->stop();
 like($t->read_file('cap-intervention.log'), qr/flushing headers early/,
     'connector flushed delayed headers before the intervention');
+
+coraza_crash_check::assert_no_crash($t,
+	'no worker crash in error.log');

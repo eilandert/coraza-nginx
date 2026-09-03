@@ -16,6 +16,9 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 
+use lib '.';
+use coraza_crash_check;
+
 ###############################################################################
 
 select STDERR; $| = 1;
@@ -74,7 +77,7 @@ $t->write_file("/body_access_off", $large_body);
 
 $t->run();
 $t->todo_alerts();
-$t->plan(3);
+$t->plan(4);
 
 ###############################################################################
 
@@ -84,3 +87,6 @@ my $r = http_get('/body_access_off');
 like($r, qr/^HTTP.*200/, 'large response with SecResponseBodyAccess Off returns 200');
 like($r, qr/\Q$large_body\E/, 'large response body delivered intact');
 
+
+coraza_crash_check::assert_no_crash($t,
+	'no worker crash in error.log');

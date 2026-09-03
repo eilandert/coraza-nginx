@@ -26,6 +26,9 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 
+use lib '.';
+use coraza_crash_check;
+
 ###############################################################################
 
 select STDERR; $| = 1;
@@ -83,7 +86,7 @@ EOF
 
 $t->run();
 $t->todo_alerts();
-$t->plan(3);
+$t->plan(4);
 
 ###############################################################################
 
@@ -97,3 +100,6 @@ like($r, qr/forbidden by coraza/, 'error_page handler body delivered intact');
 # Control: a clean request never routes through the error page at all.
 like(http_get('/trigger?x=safe'), qr/^HTTP\S+ 200/,
     'clean request passes without error-page re-entry (control)');
+
+coraza_crash_check::assert_no_crash($t,
+	'no worker crash in error.log');

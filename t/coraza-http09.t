@@ -19,6 +19,9 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 
+use lib '.';
+use coraza_crash_check;
+
 ###############################################################################
 
 select STDERR; $| = 1;
@@ -58,7 +61,7 @@ EOF
 
 $t->run();
 $t->todo_alerts();
-$t->plan(2);
+$t->plan(3);
 
 ###############################################################################
 
@@ -67,7 +70,13 @@ $t->plan(2);
 my $clean = http("GET /foo\r\n");
 like($clean, qr/clean/, 'HTTP/0.9 clean request served');
 
-# 0.9 request that should still be inspected and blocked. A blocked 0.9 request
-# yields an error/close rather than the body.
+# 0.9 request that should still be inspected and blocked. HTTP/0.9 has no
+# status line, so a blocked request cannot carry a 403 -- nginx just closes
+# the connection without writing the location's body. Assert that positively
+# (empty response) rather than merely "does not contain 'clean'", which a
+# crashed worker's empty/garbled response would also satisfy.
 my $bad = http("GET /attack\r\n");
-unlike($bad, qr/clean/, 'HTTP/0.9 attacking request does not get clean body');
+is($bad, '', 'HTTP/0.9 attacking request is blocked (connection closed, no body)');
+
+coraza_crash_check::assert_no_crash($t,
+	'no worker crash in error.log');

@@ -31,12 +31,15 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 
+use lib '.';
+use coraza_crash_check;
+
 ###############################################################################
 
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(10);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(11);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -109,12 +112,18 @@ like($body, qr/data: event-1/, 'SSE with HTAB OWS before ";" delivered');
 like($body, qr/data: event-1/, 'SSE with mixed-case media type delivered');
 
 # Near-miss content types must NOT get the exemption: the phase-4 header
-# delay stays in force, so the client receives nothing early.
+# delay stays in force, so the client receives nothing early. sse_read()
+# returns (undef, undef) only when the TCP connect itself fails, so a
+# defined-but-empty pair here proves nginx accepted the connection and then
+# withheld the response -- not that the server was never reachable, which
+# would also read as "" and let a dead nginx pass this same assertion.
 ($status, $body) = sse_read('/nearmiss', 2);
-is($status . $body, '', 'near-miss "text/event-streamx" stays delayed');
+ok(defined $status && $status eq '' && $body eq '',
+	'near-miss "text/event-streamx" connects but stays delayed');
 
 ($status, $body) = sse_read('/notsse', 2);
-is($status . $body, '', 'malformed "text/event-stream junk" stays delayed');
+ok(defined $status && $status eq '' && $body eq '',
+	'malformed "text/event-stream junk" connects but stays delayed');
 
 # The exemption skips the header DELAY, not the WAF.  A phase-1 rule must
 # still block an SSE request, otherwise this change would be a bypass rather
@@ -139,7 +148,7 @@ sub sse_read {
 		Proto    => 'tcp',
 		PeerAddr => '127.0.0.1:' . port(8080),
 		Timeout  => 5,
-	) or return ('', '');
+	) or return (undef, undef);
 
 	$s->print("GET $uri HTTP/1.1\r\n"
 		. "Host: localhost\r\n"
@@ -223,3 +232,6 @@ sub sse_daemon {
 }
 
 ###############################################################################
+
+coraza_crash_check::assert_no_crash($t,
+	'no worker crash in error.log');
