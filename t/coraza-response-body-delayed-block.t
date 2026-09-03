@@ -10,15 +10,20 @@
 # turning the buffered 200 into the rule's status.  A control location without
 # a matching body confirms the same delayed 200 is released untouched.
 #
-# The delayed branch must produce the SAME client-visible response as the
-# non-delayed one: a real ngx_http_filter_finalize_request(), which runs
-# ngx_http_clean_header() + ngx_http_special_response_handler() and emits the
+# A delayed DENY must reach the client as a real error page, which means a real
+# ngx_http_filter_finalize_request(): it runs ngx_http_clean_header() +
+# ngx_http_special_response_handler(), and that handler is what emits the
 # status page.  Returning a bare status code from a body filter is not a
 # finalize -- nginx propagates it up through ngx_http_output_filter() with no
 # header ever written, so the client gets a truncated response or a reset.
-# Asserting the status line alone cannot tell those two apart, so every
-# blocked case below also asserts the error page BODY and asserts that the
-# buffered origin body was discarded rather than leaked.
+# Asserting the status line alone cannot tell those two apart, so the blocked
+# case below also asserts the error page BODY and asserts that the buffered
+# origin body was discarded rather than leaked.
+#
+# A phase-4 REDIRECT while delayed takes the opposite exit and is covered too:
+# there the finalize is the wrong move, because it would discard the Location
+# header the intervention just installed.  Deny and redirect must diverge at
+# this point, so both are pinned.
 
 ###############################################################################
 
@@ -83,17 +88,37 @@ http {
             ';
         }
 
-        # Reference: identical rule with the header delay OFF.  This is the
-        # sibling path that has always called ngx_http_filter_finalize_request,
-        # so its response is the ground truth the delayed path must match.
-        location /nodelay.txt {
-            coraza_delay_response_headers off;
+        # A phase-4 REDIRECT while headers are delayed.  A deny wants the
+        # error page a finalize builds, but a redirect must not be finalized:
+        # ngx_http_coraza_process_intervention() has already installed
+        # Location, and ngx_http_filter_finalize_request() would build a fresh
+        # error page with fresh headers and drop it, leaving a 3xx pointing
+        # nowhere.  The two intervention kinds have to part ways here.
+        location /redirect.txt {
+            coraza_delay_response_headers on;
             coraza_rules '
                 SecRuleEngine On
                 SecResponseBodyAccess On
                 SecResponseBodyMimeType text/plain
                 SecResponseBodyLimit 65536
-                SecRule RESPONSE_BODY "@rx BLOCK ME" "id:302,phase:4,deny,log,status:403"
+                SecRule RESPONSE_BODY "@rx BLOCK ME" "id:302,phase:4,log,status:302,redirect:http://www.example.com/blocked"
+            ';
+        }
+
+        # The origin already carries a Location of its own, and the body then
+        # trips a phase-4 DENY.  The deny must still win and produce the error
+        # page: keying the redirect exit off r->headers_out.location alone
+        # would mistake the origin's header for a redirect intervention and
+        # answer with a header-only 403 pointing at the origin's target.
+        location /origin-redirect.txt {
+            coraza_delay_response_headers on;
+            add_header Location http://origin.example.com/elsewhere always;
+            coraza_rules '
+                SecRuleEngine On
+                SecResponseBodyAccess On
+                SecResponseBodyMimeType text/plain
+                SecResponseBodyLimit 65536
+                SecRule RESPONSE_BODY "@rx BLOCK ME" "id:303,phase:4,deny,log,status:403"
             ';
         }
 
@@ -118,12 +143,13 @@ my $origin = "leading text ... BLOCK ME ... trailing text\n";
 my $denied = "DENIED-BY-PHASE4-ERROR-PAGE\n";
 $t->write_file("/denied-403.html", $denied);
 $t->write_file("/block.txt", $origin);
-$t->write_file("/nodelay.txt", $origin);
+$t->write_file("/redirect.txt", $origin);
+$t->write_file("/origin-redirect.txt", $origin);
 $t->write_file("/pass.txt", $clean);
 
 $t->run();
 $t->todo_alerts();
-$t->plan(9);
+$t->plan(11);
 
 ###############################################################################
 
@@ -148,14 +174,23 @@ like($blocked, qr/\Q$denied\E/,
 unlike($blocked, qr/\QBLOCK ME\E/,
     'buffered origin body is not leaked on a delayed block');
 
-# Ground truth: the non-delayed sibling, whose finalize was never in question.
-my $nodelay = http_get('/nodelay.txt');
-like($nodelay, qr/^HTTP.*403/,
-    'RESPONSE_BODY match without header delay -> blocked with rule status');
-like($nodelay, qr/\Q$denied\E/,
-    'non-delayed block emits the 403 error page body');
-unlike($nodelay, qr/\QBLOCK ME\E/,
-    'buffered origin body is not leaked on a non-delayed block');
+# A delayed phase-4 redirect takes the other exit: it must reach the client as
+# a real 3xx carrying Location, which a finalize would have thrown away along
+# with the rest of the headers.
+my $redirect = http_get('/redirect.txt');
+like($redirect, qr/^HTTP.*302/,
+    'RESPONSE_BODY redirect while headers delayed -> redirect status');
+like($redirect, qr{Location: http://www\.example\.com/blocked},
+    'delayed redirect keeps the Location header');
+unlike($redirect, qr/\QBLOCK ME\E/,
+    'buffered origin body is not leaked on a delayed redirect');
+
+# A deny on a response that already has its own Location must still finalize.
+my $origin_redir = http_get('/origin-redirect.txt');
+like($origin_redir, qr/^HTTP.*403/,
+    'deny beats a pre-existing origin Location');
+like($origin_redir, qr/\Q$denied\E/,
+    'deny on an origin redirect still emits the 403 error page body');
 
 my $r = http_get('/pass.txt');
 like($r, qr/^HTTP.*200/, 'non-matching delayed body -> released as 200');
