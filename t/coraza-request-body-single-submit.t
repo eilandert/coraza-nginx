@@ -68,7 +68,7 @@ http {
                 SecRuleEngine On
                 SecRequestBodyAccess On
                 SecAction "id:1,phase:1,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
-                SecRequestBodyLimit 9
+                SecRequestBodyLimit 20
                 SecRequestBodyLimitAction Reject
             ';
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
@@ -78,7 +78,6 @@ http {
             coraza_rules '
                 SecRuleEngine On
                 SecRequestBodyAccess On
-                SecAction "id:1,phase:1,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
                 SecRule ARGS_POST:val "@rx ^one\$" "id:2,phase:2,deny,log,status:403"
                 SecRule ARGS_POST:val "@rx one.*one" "id:3,phase:2,deny,log,status:409"
             ';
@@ -95,16 +94,21 @@ $t->plan(2);
 
 ###############################################################################
 
-# Body is exactly 9 bytes -- at the configured SecRequestBodyLimit. A single
-# correct submission stays at-limit and passes. A doubled submission (18
-# bytes effective) would exceed the limit and Reject with 413.
-like(http_req_body('POST', '/singlesubmit', '123456789'), qr/TEST-OK-IF-YOU-SEE-THIS/,
+# SecRequestBodyLimit is 20 (exclusive: the limit itself already trips
+# Reject, per t/coraza-request-body.t's /bodylimitreject pair where 129
+# passes at 128 bytes and blocks at 132). The body here is 12 bytes --
+# comfortably under 20 for a single submission, but a doubled submission
+# (24 bytes effective) would exceed 20 and Reject with 413.
+like(http_req_body('POST', '/singlesubmit', '123456789012'), qr/TEST-OK-IF-YOU-SEE-THIS/,
     "POST body submitted once stays within SecRequestBodyLimit");
 
 # ARGS_POST:val is "one" for a single submission (rule 2 denies with 403,
 # proving the rule engine sees it and the value is not doubled to "oneone",
-# which rule 3 would instead catch and deny with 409).
-like(http_req_body('POST', '/singlesubmitargs', 'val=one'), qr/^HTTP.*403/,
+# which rule 3 would instead catch and deny with 409). Uses
+# http_req_body_postargs, matching t/coraza-request-body.t's
+# /nobodyaccess ARGS_POST case: Content-Type declares urlencoded and no
+# ctl:requestBodyProcessor SecAction is needed.
+like(http_req_body_postargs('POST', '/singlesubmitargs', 'one'), qr/^HTTP.*403/,
     "POST body ARGS_POST value not duplicated across a resubmission");
 
 ###############################################################################
@@ -146,6 +150,21 @@ sub http_req_body {
 	my $method = shift;
 	my $uri = shift;
 	my $body = shift;
+	return http(
+		"$method $uri HTTP/1.1" . CRLF
+		. "Host: localhost" . CRLF
+		. "Connection: close" . CRLF
+		. "Content-Type: application/x-www-form-urlencoded" . CRLF
+		. "Content-Length: " . (length $body) . CRLF . CRLF
+		. $body
+	);
+}
+
+sub http_req_body_postargs {
+	my $method = shift;
+	my $uri = shift;
+	my $val = shift;
+	my $body = "val=$val";
 	return http(
 		"$method $uri HTTP/1.1" . CRLF
 		. "Host: localhost" . CRLF
