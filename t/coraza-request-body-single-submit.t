@@ -108,13 +108,15 @@ like(http_req_body('POST', '/singlesubmit', '123456789012'), qr/TEST-OK-IF-YOU-S
 # no ARGS_POST params from it at all. This is a test-body defect, not a
 # connector defect: t/coraza-request-body.t's http_req_body_postargs() sends
 # "test=<value>" and its /nobodyaccess ARGS_POST rule is reachable there.
-# Building a doubling-detection body for THIS test still needs a value where
-# a byte-for-byte-doubled submission also parses as a distinct, matchable
-# ARGS_POST value (e.g. "val=one" doubling to "val=oneone" only works if the
-# duplication is a straight concatenation of the raw body, which is the
-# specific defect this file's primary assertion above already covers via the
-# body-size oracle) -- resolving that reshaping is its own task; a decorative
-# assertion here would be worse than the stated gap.
+# Building a doubling-detection body for THIS test still needs care about
+# what a doubled submission parses to: a byte-for-byte duplicated raw body
+# "val=one" is "val=oneval=one", which the urlencoded parser reads as one
+# pair, val="oneval=one" -- not "oneone" -- so a rule written for the
+# doubled ARGS_POST value must target that parsed shape, not a naive
+# concatenation of the values. The raw-byte duplication itself is the defect
+# this file's primary assertion above already covers via the body-size
+# oracle; resolving the ARGS_POST-level reshaping is its own task, and a
+# decorative assertion here would be worse than the stated gap.
 
 ###############################################################################
 

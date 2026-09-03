@@ -8,13 +8,16 @@
 # SecRuleEngine On instead only logs and lets the request through under
 # DetectionOnly.
 #
-# Two locations share the IDENTICAL phase-1 deny rule, differing only in
-# SecRuleEngine. Asserting the DetectionOnly location returns 200 alone would
-# be consistent with the rule silently never running at all, so this also
-# checks a SecAuditLog file for the rule's msg to prove it matched. A benign
-# request to each location is the negative control, proving the 403/200 split
-# above is the rule engine mode and not some other difference between the two
-# locations.
+# Two locations carry the same phase-1 deny rule (same variable, operator,
+# disruptive action and status; ids differ only because Coraza requires them
+# to be unique) and differ in SecRuleEngine. The DetectionOnly location adds
+# `auditlog` plus a SecAuditLog file: that changes only what gets recorded,
+# never whether the rule intervenes. Asserting the DetectionOnly location
+# returns 200 alone would be consistent with the rule silently never running
+# at all, so this also checks that audit log for the rule's msg to prove it
+# matched. A benign request to each location is the negative control,
+# proving the 403/200 split above is the rule engine mode and not some other
+# difference between the two locations.
 # See src/ngx_http_coraza_module.c (phase evaluation / intervention handling).
 #
 # ROOT CAUSE (VERIFIED, static read + CI, 2026-09-03): a match under
@@ -64,7 +67,7 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080;
+        listen       127.0.0.1:%%PORT_8080%%;
         server_name  localhost;
 
         location /on {
@@ -100,7 +103,7 @@ $t->run();
 my $blocked = http_get('/on?x=bad');
 like($blocked, qr!^HTTP/\S+ 403!, 'SecRuleEngine On blocks the matching request');
 
-# SecRuleEngine DetectionOnly: the identical rule matches but must not block.
+# SecRuleEngine DetectionOnly: the same rule matches but must not block.
 my $detected = http_get('/detect?x=bad');
 like($detected, qr!^HTTP/\S+ 200!, 'SecRuleEngine DetectionOnly does not block a matching request');
 
