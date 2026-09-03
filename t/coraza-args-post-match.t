@@ -2,16 +2,42 @@
 
 # Tests for Coraza-nginx connector: ARGS_POST matching.
 #
-# No existing test demonstrates a rule actually matching against ARGS_POST.
-# t/coraza-request-body.t's /nobodyaccess location has an ARGS_POST rule, but
-# every probe against it is a benign pass -- it never proves the rule can
-# fire. t/coraza-request-body-single-submit.t attempted an ARGS_POST-based
-# oracle and found the rule did not match in CI; the root cause was a
-# malformed probe body (it omitted the "=" from the urlencoded pair, so
-# nginx/Coraza never parsed a POST arg named "val" out of it in the first
-# place) -- not a connector defect. This test sends a well-formed
-# "val=one"/"val=two" pair with the required Content-Type and asserts the
-# rule matches and blocks the former while a benign control passes.
+# No pre-existing test demonstrated a rule actually matching against
+# ARGS_POST. t/coraza-request-body.t's /nobodyaccess location has an
+# ARGS_POST rule, but every probe against it is a benign pass -- it never
+# proves the rule can fire.
+#
+# Two earlier attempts at such an oracle failed for reasons that are NOT
+# connector defects, and both are recorded here so they are not re-derived:
+#
+#   1. t/coraza-request-body-single-submit.t's attempt sent a malformed
+#      probe body (it omitted the "=" from the urlencoded pair), so no POST
+#      arg named "val" was ever parsed out of it.
+#
+#   2. This file's first version sent a well-formed "val=one" body with the
+#      correct Content-Type but served the location with `return 200`.
+#      `return` belongs to ngx_http_rewrite_module and is evaluated in the
+#      REWRITE phase; the connector's request-body handler is registered in
+#      the PREACCESS phase (ngx_http_coraza_module.c, postconfiguration:
+#      NGX_HTTP_PREACCESS_PHASE), which runs *after* REWRITE. A `return`
+#      location therefore finalizes the request before phase 2 is ever
+#      evaluated, so NO phase-2 rule can fire there -- not one on ARGS_POST,
+#      not one on REQUEST_BODY, not even one on a plain request header.
+#      Phase-1 rules are unaffected (they run in the REWRITE handler), which
+#      is why t/coraza-phase1-addr-uri-deny.t blocks fine with `return 200`.
+#
+# The working idiom for any phase-2 assertion is therefore a location served
+# by an upstream (proxy_pass), as every passing body test in this suite uses.
+# This test sends a well-formed "val=one"/"val=two" urlencoded pair with the
+# required Content-Type to such a location and asserts that ARGS_POST:val
+# matches and blocks the former while a benign control passes.
+#
+# The ARGS_POST rule here deliberately carries NO
+# ctl:requestBodyProcessor=URLENCODED. The other body tests set it
+# explicitly; this one pins the contract that Coraza selects the URLENCODED
+# body processor from the Content-Type request header on its own, which
+# requires the connector to have fed that header to the engine before
+# ProcessRequestBody runs.
 
 ###############################################################################
 
@@ -20,6 +46,7 @@ use strict;
 
 use Test::More;
 use Socket qw/ CRLF /;
+use IO::Socket::INET;
 
 BEGIN { use FindBin; chdir($FindBin::Bin); }
 
@@ -33,7 +60,7 @@ select STDOUT; $| = 1;
 
 my $t = Test::Nginx->new()->has(qw/http proxy/);
 
-$t->write_file_expand('nginx.conf', <<'EOF');
+$t->write_file_expand('nginx.conf', <<'EOF2');
 
 %%TEST_GLOBALS%%
 
@@ -51,90 +78,30 @@ http {
 
         coraza on;
 
-        # PROBE MATRIX (temporary, discriminating): each location differs in
-        # exactly one dimension so the CI result isolates the cause.
-        location /p_body {
+        location /argspost {
             coraza_rules '
                 SecRuleEngine On
                 SecRequestBodyAccess On
-                SecRule REQUEST_BODY "@rx one" "id:61,phase:2,deny,log,status:403"
+                SecRule ARGS_POST:val "@rx ^one$" "id:51,phase:2,deny,log,status:403"
             ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
-
-        location /p_argspost {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecRule ARGS_POST:val "@rx ^one$" "id:62,phase:2,deny,log,status:403"
-            ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
-        }
-
-        location /p_argspost_ctl {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecAction "id:2,phase:1,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
-                SecRule ARGS_POST:val "@rx ^one$" "id:63,phase:2,deny,log,status:403"
-            ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
-        }
-
-        location /p_args {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecRule ARGS:val "@rx ^one$" "id:64,phase:2,deny,log,status:403"
-            ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
-        }
-
-        location /p_rbp {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecRule REQBODY_PROCESSOR "@rx ." "id:65,phase:2,deny,log,status:403"
-            ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
-        }
-
-        location /p_ct {
-            coraza_rules '
-                SecRuleEngine On
-                SecRequestBodyAccess On
-                SecRule REQUEST_HEADERS:Content-Type "@rx urlencoded" "id:66,phase:2,deny,log,status:403"
-            ';
-            return 200 "TEST-OK-IF-YOU-SEE-THIS";
-        }
-
     }
 }
-EOF
+EOF2
 
-$t->run()->waitforsocket('127.0.0.1:' . port(8080));
+$t->run_daemon(\&http_daemon);
+$t->run()->waitforsocket('127.0.0.1:' . port(8081));
 
-$t->plan(6);
+$t->plan(2);
 
 ###############################################################################
 
-like(http_post_form('/p_body', 'val=one'), qr/^HTTP.*403/,
-    'PROBE REQUEST_BODY matches raw body');
+like(http_post_form('/argspost', 'val=one'), qr/^HTTP.*403/,
+    'ARGS_POST:val matches a well-formed urlencoded pair and blocks');
 
-like(http_post_form('/p_argspost', 'val=one'), qr/^HTTP.*403/,
-    'PROBE ARGS_POST without ctl');
-
-like(http_post_form('/p_argspost_ctl', 'val=one'), qr/^HTTP.*403/,
-    'PROBE ARGS_POST with explicit ctl:requestBodyProcessor=URLENCODED');
-
-like(http_post_form('/p_args', 'val=one'), qr/^HTTP.*403/,
-    'PROBE ARGS (combined) matches');
-
-like(http_post_form('/p_rbp', 'val=one'), qr/^HTTP.*403/,
-    'PROBE REQBODY_PROCESSOR is non-empty');
-
-like(http_post_form('/p_ct', 'val=one'), qr/^HTTP.*403/,
-    'PROBE Content-Type header reached the engine');
+like(http_post_form('/argspost', 'val=two'), qr/TEST-OK-IF-YOU-SEE-THIS/,
+    'ARGS_POST:val benign control (non-matching value) passes');
 
 ###############################################################################
 
@@ -148,6 +115,52 @@ sub http_post_form {
 		. "Content-Length: " . (length $body) . CRLF . CRLF
 		. $body
 	);
+}
+
+###############################################################################
+
+sub http_daemon {
+	my $server = IO::Socket::INET->new(
+		Proto => 'tcp',
+		LocalHost => '127.0.0.1:' . port(8081),
+		Listen => 5,
+		Reuse => 1
+	)
+		or die "Can't create listening socket: $!\n";
+
+	local $SIG{PIPE} = 'IGNORE';
+
+	while (my $client = $server->accept()) {
+		$client->autoflush(1);
+
+		my $headers = '';
+		while (<$client>) {
+			$headers .= $_;
+			last if (/^\x0d?\x0a?$/);
+		}
+
+		# Drain the forwarded request body before responding so nginx's
+		# upstream write completes; otherwise the proxy round-trip races
+		# on an unread socket (intermittent 502).
+		if ($headers =~ /Content-Length:\s*(\d+)/i) {
+			my $need = $1;
+			my $got = 0;
+			while ($got < $need) {
+				my $buf;
+				my $n = read($client, $buf, $need - $got);
+				last if !defined $n || $n == 0;
+				$got += $n;
+			}
+		}
+
+		print $client "HTTP/1.1 200 OK" . CRLF;
+		print $client "Content-Length: 23" . CRLF;
+		print $client "Connection: close" . CRLF . CRLF;
+		print $client "TEST-OK-IF-YOU-SEE-THIS"
+			unless $headers =~ /^HEAD/i;
+
+		close $client;
+	}
 }
 
 ###############################################################################
