@@ -42,7 +42,7 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(18);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(19);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -170,6 +170,10 @@ for my $loc (qw(off on)) {
 		"Content-Length longer than actual body never yields 200 ($loc)");
 }
 
+is(origin_saw('short'), 0,
+	'origin never invoked for the truncated body (nginx does not proxy a '
+	. 'request whose declared Content-Length was never fully received)');
+
 # --- case 5: stacked/unknown Content-Encoding under response body access --
 #
 # The /on/ location above already runs with SecResponseBodyAccess On, so it
@@ -211,12 +215,26 @@ sub raw_request {
 		$reply = <$s> // '';
 		alarm(0);
 	};
+	# A SIGALRM stores "timeout\n" in $@ via die; swallowing it would let
+	# raw_request return '' silently, and every unlike(..., qr!^HTTP/1\.1
+	# 200!) below would then pass vacuously on a hung connection instead of
+	# on an observed rejection. Cancel any pending alarm and rethrow so a
+	# real hang fails the test loudly instead of faking a pass.
+	if (my $err = $@) {
+		alarm(0);
+		close $s;
+		die $err;
+	}
 	close $s;
 	return $reply;
 }
 
 # Send a Content-Length declaring more bytes than are actually written, then
-# close the connection early -- the classic truncated-body case.
+# half-close the write side and close -- the classic truncated-body case.
+# Half-closing (not just close()) is what actually signals "no more bytes
+# coming" to nginx while the read side stays open long enough to receive a
+# reply; a plain close() can leave nginx seeing a live, merely slow request
+# instead of the peer-closed truncation this case is meant to exercise.
 sub short_body_request {
 	my ($loc) = @_;
 
@@ -231,6 +249,7 @@ sub short_body_request {
 		. "Content-Length: 100" . CRLF
 		. "Connection: close" . CRLF . CRLF
 		. "short";
+	shutdown($s, 1) or die "Can't half-close request socket: $!\n";
 
 	my $reply = '';
 	local $SIG{ALRM} = sub { die "timeout\n" };
@@ -240,6 +259,11 @@ sub short_body_request {
 		$reply = <$s> // '';
 		alarm(0);
 	};
+	if (my $err = $@) {
+		alarm(0);
+		close $s;
+		die $err;
+	}
 	close $s;
 	return $reply;
 }
@@ -284,7 +308,7 @@ sub origin_daemon {
 		my ($uri) = $headers =~ /^\S+\s+(\S+)/;
 		$uri //= '';
 
-		for my $tag (qw(clte badchunk smuggled)) {
+		for my $tag (qw(clte badchunk smuggled short)) {
 			if ($uri =~ /\Q$tag\E/) {
 				open(my $fh, '>', $testdir . "/seen-$tag");
 				close($fh);

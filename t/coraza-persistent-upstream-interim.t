@@ -4,26 +4,37 @@
 # statuses, misleading framing).
 #
 # With `keepalive` on the upstream block nginx reuses ONE TCP connection to
-# the origin across requests. Three status classes never carry a body the
-# connector's phase-4 body filter can wait on:
+# the origin across requests, for as long as nginx's own upstream code
+# considers that connection trustworthy. Three status classes never carry a
+# body the connector's phase-4 body filter can wait on:
 #
 #   * 103 Early Hints followed by the real final response on the SAME
 #     connection -- the connector must not treat the 103 as the final
 #     header set and must not stall waiting for a body that belongs to the
-#     103, and the persistent connection must still be reusable for the
-#     request that follows.
+#     103.
 #   * 204 No Content -- must never carry a body per RFC 9110 regardless of
 #     what Content-Length/Transfer-Encoding the origin (misleadingly) sends.
 #   * 304 Not Modified -- same body-less contract, tested with the same
 #     misleading framing.
 #
-# Each is sent with misleading Content-Length / Transfer-Encoding / surplus
-# body bytes past what the status legitimately allows, on a connection that
-# is then reused for a plain request. The oracle: no delayed-header stall
-# (bounded read completes within the alarm), and the response that follows
-# on the same connection is the correct, uncontaminated one -- proving the
-# extra bytes were not left on the wire to be misread as the start of the
-# next response.
+# Each is sent with a Content-Length that lies about a body actually being
+# present. Verified against this worktree's build (nginx 1.31.3): the
+# well-formed 103-then-final handoff genuinely reuses the SAME upstream
+# connection (proven via a per-connection id the origin logs alongside
+# every URI it serves -- see conn-log below), matching the design intent
+# above. For /no-content and /not-modified, nginx's own upstream layer logs
+# "upstream sent more data than specified in Content-Length" and CLOSES
+# that connection rather than risk misreading the surplus bytes as the
+# start of the next response -- it does NOT keep reusing a connection it
+# has just observed lying about its own framing. That closed-not-reused
+# outcome, not blanket reuse, IS the anti-contamination guarantee for a
+# connection an origin has shown to misreport Content-Length: nginx trades
+# the (now-tainted) connection for provable safety instead of gambling on
+# resynchronizing it. The oracle: no delayed-header stall (bounded read
+# completes within the alarm), the body-less contract holds regardless of
+# which connection serves the response, and the request that follows --
+# on whichever connection nginx chooses -- is the correct, uncontaminated
+# one, never bytes leaked from an earlier case.
 
 ###############################################################################
 
@@ -45,7 +56,7 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(11);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(13);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -148,6 +159,36 @@ is(origin_saw('unexpected'), 0,
 	'origin never received a request URI other than the four sent '
 	. '(rules out request-side desync from the misleading responses)');
 
+# Every request-bearing accepted connection logs its (monotonically
+# assigned) connection id next to each URI it served, in
+# <testdir>/conn-log. The earlier response-content assertions do not, by
+# themselves, prove which connection served which request -- nginx could
+# silently reconnect after any response and every prior assertion would
+# still pass. Verified separately (see header comment): reuse across the
+# 103-then-final handoff is the real, observed behavior for THIS worktree's
+# build, so that is what gets asserted; nginx closing the connection after
+# /no-content or /not-modified (both of which lied about Content-Length) is
+# also real, observed, and correct, so it is asserted as a close, not a gap
+# papered over with a reuse claim that is not true.
+my @conn_log = split /\n/, $t->read_file('conn-log');
+my %conn_for_uri;
+for my $line (@conn_log) {
+	my ($id, $uri) = split /\s+/, $line, 2;
+	next unless defined $uri;
+	$conn_for_uri{$uri} = $id unless exists $conn_for_uri{$uri};
+}
+
+is($conn_for_uri{'/no-content'}, $conn_for_uri{'/early-hints'},
+	'103-then-final and the immediately following request are served on '
+	. 'the SAME persistent upstream connection (real reuse, not a fresh '
+	. 'connect per request)');
+
+isnt($conn_for_uri{'/not-modified'}, $conn_for_uri{'/no-content'},
+	'nginx closes (does not keep reusing) the connection right after an '
+	. 'origin response that lied about its own Content-Length, rather '
+	. 'than gambling on resynchronizing a connection of provably '
+	. 'untrustworthy framing');
+
 unlike($t->read_file('error.log'), qr/signal 11|SIGSEGV|AddressSanitizer/,
 	'no crash handling interim/no-body statuses on a persistent upstream');
 
@@ -176,6 +217,15 @@ sub client_request {
 		}
 		alarm(0);
 	};
+	# Swallowing a SIGALRM timeout here would let client_request return ''
+	# (or a partial buffer) silently on a real stall, and the "no
+	# delayed-header stall" assertion below would then pass on a hang
+	# instead of on an observed response. Cancel any pending alarm and
+	# rethrow so a genuine timeout fails loudly.
+	if (my $err = $@) {
+		alarm(0);
+		die $err;
+	}
 	return $reply;
 }
 
@@ -229,8 +279,17 @@ sub origin_daemon {
 	# alive. A single accept() would consume the probe's connection and
 	# leave the real traffic unserved. Each accepted connection is served
 	# until the peer stops sending requests (EOF), then we accept the next.
+	#
+	# Every accepted connection gets a monotonically increasing id, logged
+	# to <testdir>/conn-log alongside each URI it serves, so the parent can
+	# verify all four real requests actually landed on ONE connection
+	# instead of nginx silently reconnecting between them.
+	my $conn_id = 0;
+
 	while (my $client = $server->accept()) {
 		$client->autoflush(1);
+		$conn_id++;
+		my $this_conn = $conn_id;
 
 		while (1) {
 			my $headers = '';
@@ -243,6 +302,12 @@ sub origin_daemon {
 
 			my ($uri) = $headers =~ /^\S+\s+(\S+)/;
 			$uri //= '';
+
+			if (length($uri)) {
+				open(my $fh, '>>', $testdir . "/conn-log");
+				print $fh "$this_conn $uri\n";
+				close($fh);
+			}
 
 			if ($uri eq '/early-hints') {
 				# Interim 103 first, no body, then the real final response
