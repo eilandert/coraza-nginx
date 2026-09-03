@@ -129,6 +129,11 @@ jobs:
           eatmydata make -j"$(nproc)" modules
           eatmydata make -j"$(nproc)"
 
+      # Runs before the soak: if the ownership gate stops discriminating, the
+      # soak's UBSan check is silently dead and every later green is worthless.
+      - name: Verify the UBSan ownership gate detects what it claims
+        run: bash tools/test-soak-ubsan-gate.sh
+
       - name: Sanitizer soak (60s @ 4 conc)
         env:
           # No valgrind: soak.sh runs the ASan/UBSan-built nginx directly and
