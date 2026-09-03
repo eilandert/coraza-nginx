@@ -44,9 +44,24 @@ ngx_http_coraza_body_filter_init(void)
 
 /*
  * Extract body data from a buffer, handling both in-memory and file buffers.
- * Our body filter runs before the copy filter, so file-backed responses
- * (e.g. static files) arrive as file buffers with pos/last unset.  We need
- * to read the file data ourselves so Coraza can inspect it.
+ *
+ * The file-buffer path below is defensive, not currently reachable: this
+ * module's own `config` build script orders it explicitly ahead of
+ * ngx_http_copy_filter_module (and every other body-modifying filter) via
+ * ngx_module_order, which nginx's ngx_add_module() applies as "runs its
+ * postconfiguration earlier" -- and postconfiguration order is *inverse*
+ * call order for ngx_http_top_body_filter (each filter's init does
+ * `next = top; top = self`, so the filter whose postconfig runs LAST
+ * becomes the first one called). That places ngx_http_copy_filter ahead of
+ * this module in the actual body-filter chain, confirmed by an instrumented
+ * local build: a log line in ngx_http_copy_filter fires before this
+ * function ever sees the chain, for every buffer, including a multi-range
+ * request against a static file with sendfile off (the most promising
+ * known producer of non-final, non-temp file buffers). Copy filter always
+ * resolves such buffers to memory first, so Coraza never observes an
+ * in_file buffer through the normal chain. Kept as a guard in case that
+ * ordering ever changes (a build with a different ngx_module_order, or a
+ * future nginx/Angie release resequencing the filter, would make it live).
  */
 static ngx_int_t
 ngx_http_coraza_read_body_data(ngx_http_request_t *r, ngx_buf_t *buf,
