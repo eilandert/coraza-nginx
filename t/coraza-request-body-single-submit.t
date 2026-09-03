@@ -98,11 +98,23 @@ like(http_req_body('POST', '/singlesubmit', '123456789012'), qr/TEST-OK-IF-YOU-S
 # gives "oneone" (matching one.*one), so the two are distinguishable by
 # status alone. It is not asserted here because the ARGS_POST rule did not
 # fire against this connector in CI (the request returned 200 with the rule
-# never matching), and the cause was not established. The only existing
-# ARGS_POST case in the suite, t/coraza-request-body.t's /nobodyaccess, runs
-# with SecRequestBodyAccess Off and asserts a pass, so it does not
-# demonstrate ARGS_POST matching either. Resolving that is its own task;
-# a decorative assertion here would be worse than the stated gap.
+# never matching). The only existing ARGS_POST case in the suite,
+# t/coraza-request-body.t's /nobodyaccess, runs with SecRequestBodyAccess Off
+# and asserts a pass, so it does not demonstrate ARGS_POST matching either.
+#
+# ROOT CAUSE (VERIFIED, static read, 2026-09-03): the probe body used above,
+# '123456789012', has no '=' -- it is not a valid application/x-www-form-
+# urlencoded key=value pair, so ctl:requestBodyProcessor=URLENCODED extracts
+# no ARGS_POST params from it at all. This is a test-body defect, not a
+# connector defect: t/coraza-request-body.t's http_req_body_postargs() sends
+# "test=<value>" and its /nobodyaccess ARGS_POST rule is reachable there.
+# Building a doubling-detection body for THIS test still needs a value where
+# a byte-for-byte-doubled submission also parses as a distinct, matchable
+# ARGS_POST value (e.g. "val=one" doubling to "val=oneone" only works if the
+# duplication is a straight concatenation of the raw body, which is the
+# specific defect this file's primary assertion above already covers via the
+# body-size oracle) -- resolving that reshaping is its own task; a decorative
+# assertion here would be worse than the stated gap.
 
 ###############################################################################
 
