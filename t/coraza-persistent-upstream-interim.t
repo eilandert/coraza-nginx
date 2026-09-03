@@ -18,7 +18,9 @@
 #     misleading framing.
 #
 # Each is sent with a Content-Length that lies about a body actually being
-# present. Verified against this worktree's build (nginx 1.31.3): the
+# present, and the 204 is additionally sent with `Transfer-Encoding: chunked`
+# framing a chunked body, so both framing forms the origin could lie with
+# are covered. Verified against this worktree's build (nginx 1.31.3): the
 # well-formed 103-then-final handoff genuinely reuses the SAME upstream
 # connection (proven via a per-connection id the origin logs alongside
 # every URI it serves -- see conn-log below), matching the design intent
@@ -56,7 +58,7 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(13);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(17);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -141,6 +143,15 @@ like($r304, qr!^HTTP/1\.1 304!, '304: status line passed through');
 unlike($r304, qr!BADBODY!,
 	'304: no body delivered to the client despite the origin sending one');
 
+# --- case 3b: 204 No Content with chunked Transfer-Encoding framing -------
+
+my $r204c = client_request($s, '/no-content-chunked');
+like($r204c, qr!^HTTP/1\.1 204!,
+	'204 (chunked framing): status line passed through');
+unlike($r204c, qr!BADBODY|Transfer-Encoding!i,
+	'204 (chunked framing): neither the chunked body nor the '
+	. 'Transfer-Encoding header reaches the client');
+
 # --- control: the connection is still usable for a plain request afterward -
 
 my $rctrl = client_request($s, '/plain');
@@ -156,7 +167,7 @@ close $s;
 $t->stop();
 
 is(origin_saw('unexpected'), 0,
-	'origin never received a request URI other than the four sent '
+	'origin never received a request URI other than the five sent '
 	. '(rules out request-side desync from the misleading responses)');
 
 # Every request-bearing accepted connection logs its (monotonically
@@ -188,6 +199,14 @@ isnt($conn_for_uri{'/not-modified'}, $conn_for_uri{'/no-content'},
 	. 'origin response that lied about its own Content-Length, rather '
 	. 'than gambling on resynchronizing a connection of provably '
 	. 'untrustworthy framing');
+
+isnt($conn_for_uri{'/no-content-chunked'}, $conn_for_uri{'/not-modified'},
+	'nginx also closes the connection after the misleading 304 (the '
+	. 'request after it lands on a fresh upstream connection)');
+
+isnt($conn_for_uri{'/plain'}, $conn_for_uri{'/no-content-chunked'},
+	'nginx closes the connection after a 204 whose surplus bytes were '
+	. 'chunked-framed, exactly as it does for the Content-Length lie');
 
 unlike($t->read_file('error.log'), qr/signal 11|SIGSEGV|AddressSanitizer/,
 	'no crash handling interim/no-body statuses on a persistent upstream');
@@ -260,7 +279,7 @@ sub origin_saw {
 	return -f $file ? 1 : 0;
 }
 
-# --- origin daemon: ONE persistent connection, four sequential requests ---
+# --- origin daemon: persistent connections, five sequential requests ------
 
 sub origin_daemon {
 	my $server = IO::Socket::INET->new(
@@ -328,6 +347,13 @@ sub origin_daemon {
 				print $client "HTTP/1.1 304 Not Modified\r\n"
 					. "Content-Length: 7\r\n\r\n"
 					. "BADBODY";
+			} elsif ($uri eq '/no-content-chunked') {
+				# Same body-less contract, chunked framing: the
+				# surplus is a well-formed chunked body nginx must
+				# neither forward nor treat as the next response.
+				print $client "HTTP/1.1 204 No Content\r\n"
+					. "Transfer-Encoding: chunked\r\n\r\n"
+					. "7\r\nBADBODY\r\n0\r\n\r\n";
 			} elsif ($uri eq '/plain') {
 				my $body = "PLAIN-OK\n";
 				print $client "HTTP/1.1 200 OK\r\n"

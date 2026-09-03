@@ -42,7 +42,7 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(19);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(22);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -136,10 +136,15 @@ is(origin_saw('badchunk'), 0,
 
 # --- case 3: chunk trailers and surplus bytes after the final chunk -------
 #
-# Well-formed terminal chunk followed by extra bytes that look like another
-# request smuggled onto the same stream. Both locations must not treat the
-# surplus as a second, independently-routed request; the visible response
-# must come from the ONE legitimate request only.
+# Well-formed terminal chunk plus a trailer section, followed by extra bytes
+# shaped like a second request. The request itself is legitimate (RFC 9112
+# allows trailers), so it MUST be served and reach the origin exactly like a
+# plain request -- a connector that rejected the whole request would pass a
+# check that only looks for the absence of the surplus. The surplus bytes
+# must never be routed as a request of their own: the request carries
+# `Connection: close`, so nginx must discard anything after the terminal
+# chunk and trailers instead of pipelining it, and the origin must never see
+# `/smuggled`.
 
 for my $loc (qw(off on)) {
 	my $r = raw_request(
@@ -151,10 +156,15 @@ for my $loc (qw(off on)) {
 		. "X-Trailer: yes" . CRLF . CRLF
 		. "GET /$loc/smuggled HTTP/1.1" . CRLF . "Host: localhost" . CRLF . CRLF
 	);
+	like($r, qr!^HTTP/1\.1 200!,
+		"legitimate chunked request with a trailer section is served ($loc)");
 	unlike($r, qr!/smuggled!,
 		"surplus bytes after final chunk are not parsed as a routed request ($loc)");
 }
 
+is(origin_saw('trailer'), 1,
+	'origin received the legitimate trailer-carrying request (the reject '
+	. 'of the surplus did not also reject the request in front of it)');
 is(origin_saw('smuggled'), 0,
 	'origin never invoked via bytes smuggled past the terminal chunk');
 
@@ -177,15 +187,17 @@ is(origin_saw('short'), 0,
 # --- case 5: stacked/unknown Content-Encoding under response body access --
 #
 # The /on/ location above already runs with SecResponseBodyAccess On, so it
-# is reused directly here -- no second config/reload needed. Verify neither
-# side crashes or hangs on an origin response advertising an encoding chain
-# nginx/coraza does not decode (gzip+br stacked, or an unknown token).
+# is reused directly here -- no second config/reload needed. Neither nginx
+# nor the connector decodes response content codings, so an origin response
+# advertising a chain nginx/coraza cannot decode (gzip+br stacked, or an
+# unknown token) is passed through as opaque bytes: a 200 on both sides, no
+# hang, and no error status invented on the way.
 
 for my $enc ('gzip,br', 'unknown-codec', 'identity,gzip,unknown') {
 	for my $loc (qw(off on)) {
 		my $r = stacked_encoding_request($loc, $enc);
-		like($r, qr!^HTTP/1\.1 (200|403|502)!,
-			"stacked/unknown Content-Encoding '$enc' handled without hang or 5xx crash ($loc)");
+		like($r, qr!^HTTP/1\.1 200!,
+			"stacked/unknown Content-Encoding '$enc' passes through undecoded, no hang ($loc)");
 	}
 }
 
@@ -308,7 +320,7 @@ sub origin_daemon {
 		my ($uri) = $headers =~ /^\S+\s+(\S+)/;
 		$uri //= '';
 
-		for my $tag (qw(clte badchunk smuggled short)) {
+		for my $tag (qw(clte badchunk smuggled short trailer)) {
 			if ($uri =~ /\Q$tag\E/) {
 				open(my $fh, '>', $testdir . "/seen-$tag");
 				close($fh);
