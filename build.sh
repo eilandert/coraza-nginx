@@ -1,11 +1,22 @@
 #!/bin/bash
 
 NGINX_VERSION=1.18.0
+# sha256 of https://nginx.org/download/nginx-1.18.0.tar.gz, cross-checked against
+# the upstream detached PGP signature (nginx-1.18.0.tar.gz.asc, signed by Maxim
+# Dounin, key B0F4253373F8F6F510D42178520A9993A1C052F8).
+# Bump together with NGINX_VERSION above.
+NGINX_SHA256=4c373e7ab5bf91d34a4f11a0c9496561061ba5eee6020db272a17a7228d35f99
 
-mkdir ~/src
+mkdir -p ~/src
 
 set -eux; \
-    curl "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o - | tar zxC ~/src -f -;
+    curl -fSL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 \
+      -o ~/src/nginx.tar.gz \
+      "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
+    printf '%s  %s\n' "${NGINX_SHA256}" ~/src/nginx.tar.gz > ~/src/nginx.sha256; \
+    sha256sum -c ~/src/nginx.sha256; \
+    tar zxC ~/src -f ~/src/nginx.tar.gz; \
+    rm -f ~/src/nginx.tar.gz ~/src/nginx.sha256
 
 # Pre-reqs:
 # diffstat libpcre2-16-0 libpcre2-32-0 libpcre2-dev libpcre2-posix2 quilt

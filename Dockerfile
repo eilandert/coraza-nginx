@@ -11,12 +11,29 @@ RUN set -eux; \
     bash \
     make
 
+# libcoraza, pinned by commit + sha256.
+#
+# LIBCORAZA_VERSION is documentation only: it records which release
+# LIBCORAZA_COMMIT is the tag target of. The fetch uses the commit, because a
+# tag is a mutable ref — it can be force-moved to different contents — whereas a
+# commit archive cannot change. (libcoraza publishes no release assets, so a
+# signed/immutable upstream asset is not an option here.) Same reasoning and
+# same URL form as NGINX_TESTS_REF below and in .github/versions.env.
+#
+# Bump all three together; refresh the hash with
+#   .github/scripts/fetch-verify.sh <url> - <out>
 ARG LIBCORAZA_VERSION=v1.1.0
+ARG LIBCORAZA_COMMIT=c3d99787cb2613b13107170d1a018eccdf31ba8a
+ARG LIBCORAZA_SHA256=5ce260f644c1ceed9be3aee424475895833fe14aec337f675c10a979adfb296f
 
 RUN set -eux; \
-    wget https://github.com/corazawaf/libcoraza/tarball/${LIBCORAZA_VERSION} -O /tmp/libcoraza.tar.gz; \
-    tar -xvf /tmp/libcoraza.tar.gz; \
-    cd *-libcoraza-*; \
+    curl -fSL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 \
+      -o /tmp/libcoraza.tar.gz \
+      "https://github.com/corazawaf/libcoraza/archive/${LIBCORAZA_COMMIT}.tar.gz"; \
+    printf '%s  %s\n' "${LIBCORAZA_SHA256}" /tmp/libcoraza.tar.gz > /tmp/libcoraza.sha256; \
+    sha256sum -c /tmp/libcoraza.sha256; \
+    tar -xf /tmp/libcoraza.tar.gz; \
+    cd libcoraza-*; \
     ./build.sh; \
     ./configure; \
     make; \
@@ -49,9 +66,34 @@ RUN set -eux; \
 
 COPY . /usr/src/coraza-nginx
 
-# Download sources
+# Download sources.
+#
+# The nginx release tarball is pinned by version AND sha256. NGINX_VERSION comes
+# from the digest-pinned nginx:stable base image above, so it is deterministic —
+# but an ARG default alone would silently drift if that digest were ever bumped
+# without refreshing the hash. NGINX_SOURCE_VERSION therefore restates the
+# version the hash belongs to, and the build fails loudly if the base image's
+# NGINX_VERSION no longer matches it.
+#
+# Refresh both together when bumping the base-image digest:
+#   docker image inspect <base> --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NGINX_VERSION
+#   .github/scripts/fetch-verify.sh https://nginx.org/download/nginx-<v>.tar.gz - out
+ARG NGINX_SOURCE_VERSION=1.28.3
+ARG NGINX_SOURCE_SHA256=2c96a946bfb0882a21744ed429770a2123ae1828c7c48665092993ddee91a918
+
 RUN set -eux; \
-    curl "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o - | tar zxC /usr/src -f -;
+    if [ "$NGINX_VERSION" != "$NGINX_SOURCE_VERSION" ]; then \
+      echo "base image nginx $NGINX_VERSION != pinned source $NGINX_SOURCE_VERSION;" \
+           "refresh NGINX_SOURCE_VERSION/NGINX_SOURCE_SHA256" >&2; \
+      exit 1; \
+    fi; \
+    curl -fSL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 \
+      -o /tmp/nginx.tar.gz \
+      "https://nginx.org/download/nginx-${NGINX_SOURCE_VERSION}.tar.gz"; \
+    printf '%s  %s\n' "${NGINX_SOURCE_SHA256}" /tmp/nginx.tar.gz > /tmp/nginx.sha256; \
+    sha256sum -c /tmp/nginx.sha256; \
+    tar zxC /usr/src -f /tmp/nginx.tar.gz; \
+    rm -f /tmp/nginx.tar.gz /tmp/nginx.sha256
     # Reuse same cli arguments as the nginx:alpine image used to build
 
 RUN set -eux; \
@@ -75,10 +117,21 @@ RUN ldconfig -v
 
 COPY ./t /tmp/t
 
+# nginx-tests has no upstream releases, so it is pinned to an immutable commit
+# SHA (GitHub source tarballs are byte-stable per commit) + verified sha256,
+# rather than the mutable `tip` the previous revision fetched. Keep in sync with
+# NGINX_TESTS_REF / NGINX_TESTS_SHA256 in .github/versions.env.
+ARG NGINX_TESTS_REF=76bb761cdcaeb6cb024d605c2ef91bf8d8a602d7
+ARG NGINX_TESTS_SHA256=d67d4237799cd3c9509f2555336fed65f3ceb3a6266f8caf71842cac14bb40cd
+
 RUN apt-get update -qq && \
     apt-get install -qq --no-install-recommends curl perl && \
-    curl http://hg.nginx.org/nginx-tests/archive/tip.tar.gz -o tip.tar.gz && \
-    tar xzf tip.tar.gz && \
+    curl -fSL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 \
+      -o nginx-tests.tar.gz \
+      "https://github.com/nginx/nginx-tests/archive/${NGINX_TESTS_REF}.tar.gz" && \
+    printf '%s  %s\n' "${NGINX_TESTS_SHA256}" nginx-tests.tar.gz > nginx-tests.sha256 && \
+    sha256sum -c nginx-tests.sha256 && \
+    tar xzf nginx-tests.tar.gz && \
     cd nginx-tests-* && \
     cp /tmp/t/* . && \
     export TEST_NGINX_BINARY=/usr/sbin/nginx && \
