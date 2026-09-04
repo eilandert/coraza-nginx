@@ -309,6 +309,7 @@ ngx_http_coraza_resolv_header_connection(ngx_http_request_t *r, ngx_str_t name, 
     ngx_http_coraza_ctx_t *ctx = NULL;
     ngx_http_core_loc_conf_t *clcf = NULL;
     char *connection = NULL;
+    size_t connection_len = 0;
     ngx_str_t value;
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
@@ -330,16 +331,23 @@ ngx_http_coraza_resolv_header_connection(ngx_http_request_t *r, ngx_str_t name, 
 
     if (r->headers_out.status == NGX_HTTP_SWITCHING_PROTOCOLS) {
         connection = "upgrade";
+        connection_len = sizeof("upgrade") - 1;
     } else if (r->keepalive) {
         connection = "keep-alive";
+        connection_len = sizeof("keep-alive") - 1;
         if (clcf->keepalive_header)
         {
             u_char buf[1024];
-            ngx_sprintf(buf, "timeout=%T%Z", clcf->keepalive_header);
+            u_char *p2;
             ngx_str_t name2 = ngx_string("Keep-Alive");
 
+            /* %Z writes the NUL terminator and ngx_sprintf returns a
+             * pointer past the last byte written, so (p2 - buf - 1) is the
+             * string length excluding that NUL -- no strlen() rescan. */
+            p2 = ngx_sprintf(buf, "timeout=%T%Z", clcf->keepalive_header);
+
             value.data = buf;
-            value.len = strlen((char *)buf);
+            value.len = (size_t) (p2 - buf - 1);
 
             if (ngx_http_coraza_add_response_header(r, ctx, &name2, &value)
                 != NGX_OK)
@@ -349,10 +357,11 @@ ngx_http_coraza_resolv_header_connection(ngx_http_request_t *r, ngx_str_t name, 
         }
     } else {
         connection = "close";
+        connection_len = sizeof("close") - 1;
     }
 
     value.data = (u_char *) connection;
-    value.len = strlen(connection);
+    value.len = connection_len;
 
     return ngx_http_coraza_add_response_header(r, ctx, &name, &value);
 }
@@ -458,19 +467,16 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
     ctx->processed = 1;
 
     /*
-     * Arm the bulk collector when libcoraza can take all response headers in
-     * one cgo crossing (1.6+).  Every ngx_http_coraza_add_response_header()
-     * below then buffers into ctx->resp_hdr_collect instead of crossing per
-     * header; we flush the whole set once, just before
-     * coraza_process_response_headers().  If arming fails (allocation) or the
-     * symbol is absent, resp_hdr_collect stays NULL and the per-header path is
-     * used unchanged.
+     * Arm the bulk collector so all response headers go in one cgo crossing.
+     * Every ngx_http_coraza_add_response_header() below then buffers into
+     * ctx->resp_hdr_collect instead of crossing per header; we flush the
+     * whole set once, just before coraza_process_response_headers(). If
+     * arming fails (allocation), resp_hdr_collect stays NULL and the
+     * per-header path is used unchanged.
      */
-    if (ngx_http_coraza_bulk_headers_available()) {
-        ctx->resp_hdr_collect = ngx_array_create(r->pool, 16,
-            sizeof(ngx_http_coraza_header_t));
-        /* NULL on failure is fine: falls back to the direct path. */
-    }
+    ctx->resp_hdr_collect = ngx_array_create(r->pool, 16,
+        sizeof(ngx_http_coraza_header_t));
+    /* NULL on failure is fine: falls back to the direct path. */
 
     /*
      *
