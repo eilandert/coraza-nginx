@@ -84,11 +84,16 @@ ngx_http_coraza_rewrite_handler(ngx_http_request_t *r)
             server_addr = "unix";
         } else {
             u_char addr[NGX_SOCKADDR_STRLEN];
-            ngx_server_addr.len = NGX_SOCKADDR_STRLEN;
+
+            /* The unconditional call above already populated
+             * connection->local_sockaddr/local_socklen, so format directly
+             * with ngx_sock_ntop instead of calling
+             * ngx_connection_local_sockaddr() again -- it would just
+             * getsockname() a second time redundantly (see its NGX_OK-cached
+             * fast path) before doing the exact same ngx_sock_ntop call. */
+            ngx_server_addr.len = ngx_sock_ntop(connection->local_sockaddr,
+                connection->local_socklen, addr, NGX_SOCKADDR_STRLEN, 0);
             ngx_server_addr.data = addr;
-            if (ngx_connection_local_sockaddr(r->connection, &ngx_server_addr, 0) != NGX_OK) {
-                return NGX_HTTP_INTERNAL_SERVER_ERROR;
-            }
             server_port = ngx_inet_get_port(connection->local_sockaddr);
             if (ngx_str_to_char(ngx_server_addr, &server_addr, r->pool) != NGX_OK) {
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
