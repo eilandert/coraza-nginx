@@ -62,12 +62,12 @@ my $t = Test::Nginx->new()->has(qw/http/)->plan(8);
 $t->write_file('cr.rules',
     "SecRuleEngine On\n" .
     "SecRule ARGS:x \"\@streq go\" " .
-    "\"id:30,phase:1,status:302,redirect:http://example.org/evil\x0dinjected,log\"\n");
+    "\"id:30,phase:1,status:302,redirect:http://example.org/evil\x0dinjected,log,t:none\"\n");
 
 $t->write_file('del.rules',
     "SecRuleEngine On\n" .
     "SecRule ARGS:x \"\@streq go\" " .
-    "\"id:32,phase:1,status:302,redirect:http://example.org/evil\x7finjected,log\"\n");
+    "\"id:32,phase:1,status:302,redirect:http://example.org/evil\x7finjected,log,t:none\"\n");
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -89,7 +89,7 @@ http {
             coraza on;
             coraza_rules '
                 SecRuleEngine On
-                SecRule ARGS:x "@streq go" "id:20,phase:1,status:302,redirect:http://example.org/clean/path?a=b,log"
+                SecRule ARGS:x "@streq go" "id:20,phase:1,status:302,redirect:http://example.org/clean/path?a=b,log,t:none"
             ';
         }
 
