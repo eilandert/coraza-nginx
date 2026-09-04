@@ -82,8 +82,8 @@ typedef struct {
     /* When non-NULL, ngx_http_coraza_add_response_header() collects pairs
      * here instead of making one cgo call each, so the header filter can
      * submit the whole set via coraza_add_response_headers() in a single
-     * crossing.  NULL => direct per-header cgo path, taken only when the
-     * ngx_array_create() that arms the collector fails. */
+     * crossing.  It is NULL outside collection, during fallback replay, or
+     * when ngx_array_create() cannot arm the collector. */
     ngx_array_t *resp_hdr_collect;
 
     unsigned waiting_more_body:1;
@@ -244,9 +244,9 @@ int ngx_http_coraza_is_response_body_processable(coraza_transaction_t t);
 /* Bulk header entry points. Both are loaded with the mandatory DL_SYM in
  * ngx_http_coraza_dl_open() and require the enforced >= 1.7.0 floor, so they
  * are always available -- no runtime capability check needed. */
-/* NOTE: `packed` is non-const to match libcoraza's SWIG-generated 1.6 header
- * (which declares `char *packed`); a `const char *` here trips -Werror
- * conflicting-types when the connector is built against the real 1.6 header. */
+/* NOTE: `packed` is non-const to match libcoraza's generated header, which
+ * declares `char *packed`; a `const char *` here trips -Werror
+ * conflicting-types. */
 int coraza_add_request_headers(coraza_transaction_t t, char *packed,
     int packed_len, int count);
 int coraza_add_response_headers(coraza_transaction_t t, char *packed,

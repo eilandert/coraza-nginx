@@ -63,7 +63,7 @@ http {
             coraza on;
             coraza_rules '
                 SecRuleEngine On
-                SecRule REQUEST_HEADERS:X-Probe "@streq blockme" "id:100,phase:1,deny,status:403,log"
+        SecRule REQUEST_HEADERS:X-Probe "@streq blockme" "id:100,phase:1,deny,status:403,log,t:none"
             ';
             return 200 "ok";
         }
@@ -75,7 +75,7 @@ http {
             coraza on;
             coraza_rules '
                 SecRuleEngine On
-                SecRule RESPONSE_HEADERS:X-Secret "@streq leak" "id:200,phase:3,deny,status:403,log"
+        SecRule RESPONSE_HEADERS:X-Secret "@streq leak" "id:200,phase:3,deny,status:403,log,t:none"
             ';
             add_header X-Secret "leak";
             return 200 "ok";
@@ -87,8 +87,8 @@ http {
             coraza on;
             coraza_rules '
                 SecRuleEngine On
-                SecRule REQUEST_HEADERS:X-Probe "@streq blockme" "id:100,phase:1,deny,status:403,log"
-                SecRule RESPONSE_HEADERS:X-Secret "@streq leak" "id:200,phase:3,deny,status:403,log"
+        SecRule REQUEST_HEADERS:X-Probe "@streq blockme" "id:100,phase:1,deny,status:403,log,t:none"
+        SecRule RESPONSE_HEADERS:X-Secret "@streq leak" "id:200,phase:3,deny,status:403,log,t:none"
             ';
             add_header X-Secret "safe";
             return 200 "ok";
