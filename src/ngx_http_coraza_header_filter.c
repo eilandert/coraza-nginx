@@ -458,19 +458,16 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
     ctx->processed = 1;
 
     /*
-     * Arm the bulk collector when libcoraza can take all response headers in
-     * one cgo crossing (1.6+).  Every ngx_http_coraza_add_response_header()
-     * below then buffers into ctx->resp_hdr_collect instead of crossing per
-     * header; we flush the whole set once, just before
-     * coraza_process_response_headers().  If arming fails (allocation) or the
-     * symbol is absent, resp_hdr_collect stays NULL and the per-header path is
-     * used unchanged.
+     * Arm the bulk collector so all response headers go in one cgo crossing.
+     * Every ngx_http_coraza_add_response_header() below then buffers into
+     * ctx->resp_hdr_collect instead of crossing per header; we flush the
+     * whole set once, just before coraza_process_response_headers(). If
+     * arming fails (allocation), resp_hdr_collect stays NULL and the
+     * per-header path is used unchanged.
      */
-    if (ngx_http_coraza_bulk_headers_available()) {
-        ctx->resp_hdr_collect = ngx_array_create(r->pool, 16,
-            sizeof(ngx_http_coraza_header_t));
-        /* NULL on failure is fine: falls back to the direct path. */
-    }
+    ctx->resp_hdr_collect = ngx_array_create(r->pool, 16,
+        sizeof(ngx_http_coraza_header_t));
+    /* NULL on failure is fine: falls back to the direct path. */
 
     /*
      *

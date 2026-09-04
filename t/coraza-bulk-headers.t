@@ -5,8 +5,9 @@
 # The connector packs every request / response header into a single buffer and
 # hands the whole set to Coraza in one cgo crossing via
 # coraza_add_request_headers() / coraza_add_response_headers(), instead of one
-# crossing per header.  When the running libcoraza predates 1.6 the bulk
-# symbols are absent and the connector falls back to the per-header path.
+# crossing per header.  libcoraza >= 1.7 is a hard floor and both bulk symbols
+# are mandatory, so there is no capability fallback: the per-header path below
+# is reached only when a pack or submit actually fails at runtime.
 #
 # Correctness requirement: whichever path is taken, EVERY header must still be
 # inspected exactly once.  These tests drive a request carrying many request
