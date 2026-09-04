@@ -33,7 +33,7 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http/)->plan(10);
+my $t = Test::Nginx->new()->has(qw/http/)->plan(12);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -59,7 +59,7 @@ http {
 
         coraza_rules '
             SecRuleEngine On
-            SecRule REQUEST_URI "@contains /shared-attack" "id:1001,phase:1,deny,log,status:403"
+            SecRule REQUEST_URI "@contains /shared-attack" "id:1001,phase:1,deny,log,status:403,t:none"
         ';
 
         location / {
@@ -73,7 +73,7 @@ http {
 
         coraza_rules '
             SecRuleEngine On
-            SecRule REQUEST_URI "@contains /shared-attack" "id:1001,phase:1,deny,log,status:403"
+            SecRule REQUEST_URI "@contains /shared-attack" "id:1001,phase:1,deny,log,status:403,t:none"
         ';
 
         location / {
@@ -92,7 +92,7 @@ http {
 
         coraza_rules '
             SecRuleEngine On
-            SecRule REQUEST_URI "@contains /only-in-c" "id:2001,phase:1,deny,log,status:403"
+            SecRule REQUEST_URI "@contains /only-in-c" "id:2001,phase:1,deny,log,status:403,t:none"
         ';
 
         location / {
@@ -106,7 +106,7 @@ http {
 
         coraza_rules '
             SecRuleEngine On
-            SecRule REQUEST_URI "@contains /only-in-d" "id:2002,phase:1,deny,log,status:403"
+            SecRule REQUEST_URI "@contains /only-in-d" "id:2002,phase:1,deny,log,status:403,t:none"
         ';
 
         location / {
@@ -114,17 +114,20 @@ http {
         }
     }
 
-    # --- Order control: same two directives, opposite order. ---
+    # --- Order control: same two rules, opposite order. ---
     #
-    # SecLang is sequential, so [a,b] and [b,a] are different rulesets and
-    # must not be merged with each other.
+    # In E, the SecAction sets tx.order_probe before the SecRule reads it, so
+    # /order-probe is denied.  In F, the SecRule runs before the variable is
+    # set and the request passes.  A comparison that ignores order would merge
+    # the two WAFs and make one server use the other's policy.
 
     server {
         listen       127.0.0.1:%%PORT_8084%%;
         server_name  order_e;
 
         coraza_rules 'SecRuleEngine On';
-        coraza_rules 'SecRule REQUEST_URI "@contains /order-probe" "id:3001,phase:1,deny,log,status:403"';
+        coraza_rules 'SecAction "id:3001,phase:1,pass,nolog,setvar:tx.order_probe=1"';
+        coraza_rules 'SecRule TX:order_probe "@eq 1" "id:3002,phase:1,deny,nolog,status:403,t:none"';
 
         location / {
             return 200 "OK-E\n";
@@ -135,8 +138,9 @@ http {
         listen       127.0.0.1:%%PORT_8085%%;
         server_name  order_f;
 
-        coraza_rules 'SecRule REQUEST_URI "@contains /order-probe" "id:3002,phase:1,pass,nolog"';
         coraza_rules 'SecRuleEngine On';
+        coraza_rules 'SecRule TX:order_probe "@eq 1" "id:3002,phase:1,deny,nolog,status:403,t:none"';
+        coraza_rules 'SecAction "id:3001,phase:1,pass,nolog,setvar:tx.order_probe=1"';
 
         location / {
             return 200 "OK-F\n";
@@ -171,6 +175,13 @@ like(http_get('/only-in-d', socket => port_socket(8083)), qr/ 403 /,
 	'control: block D enforces its own rule');
 like(http_get('/only-in-d', socket => port_socket(8082)), qr/OK-C/,
 	'control: block D rule does NOT fire in block C');
+
+# --- ORDER CONTROL: the same two rules have different sequential effects. ---
+
+like(http_get('/order-probe', socket => port_socket(8084)), qr/ 403 /,
+	'order E sets the transaction variable before the deny rule reads it');
+like(http_get('/order-probe', socket => port_socket(8085)), qr/OK-F/,
+	'order F evaluates the deny rule before the variable is set');
 
 # --- The sharing itself, observed in the worker's startup log. ---
 #
