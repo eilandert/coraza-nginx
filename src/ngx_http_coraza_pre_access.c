@@ -382,15 +382,25 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
              * copy of it in memory.
              *
              * Invariant: when spilled to a file there is no in-memory
-             * remainder to also walk. This handler always sets
-             * r->request_body_in_single_buf and
+             * remainder to also walk. This does not depend on
+             * request_body_in_single_buf -- that flag only sizes rb->buf,
+             * the in-memory staging buffer used while a body still fits in
+             * memory. The actual guarantee is in
+             * ngx_http_request_body_save_filter() (ngx_http_request_body.c):
+             * whenever rb->temp_file is non-NULL or
+             * r->request_body_in_file_only is set, on completion
+             * (rest == 0 && last_saved) it unconditionally calls
+             * ngx_http_write_request_body(), which flushes every buf
+             * currently in rb->bufs to the temp file and sets
+             * rb->bufs = NULL, then replaces rb->bufs with exactly one
+             * synthetic file-backed buf spanning the whole file
+             * (b->in_file = 1). This handler sets
              * r->request_body_in_clean_file (or leaves the file-only flag
              * nginx already set) before calling
-             * ngx_http_read_client_request_body(), so nginx buffers the
-             * whole body as a single unit and only ever produces bufs *or*
-             * a temp_file for the memory-vs-file choice, never both with
-             * live data in each. Hence skipping the chain below when
-             * temp_file != NULL is safe and does not silently drop bytes.
+             * ngx_http_read_client_request_body(), so nginx only ever
+             * completes with bufs *or* a temp_file live, never both. Hence
+             * skipping the chain below when temp_file != NULL is safe and
+             * does not silently drop bytes.
              */
             dd("request body inspection: file");
 
