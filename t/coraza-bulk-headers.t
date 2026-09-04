@@ -6,8 +6,11 @@
 # hands the whole set to Coraza in one cgo crossing via
 # coraza_add_request_headers() / coraza_add_response_headers(), instead of one
 # crossing per header.  libcoraza >= 1.7 is a hard floor and both bulk symbols
-# are mandatory, so there is no capability fallback: the per-header path below
-# is reached only when a pack or submit actually fails at runtime.
+# are mandatory, so there is no capability fallback left.  Three runtime
+# conditions still select the per-header path: the collector allocation
+# failing (ngx_array_create in the header filter, ngx_palloc of the pair array
+# in rewrite.c), the pack failing on an over-range header length, and the
+# submit returning CORAZA_ERROR.
 #
 # Correctness requirement: whichever path is taken, EVERY header must still be
 # inspected exactly once.  These tests drive a request carrying many request
@@ -135,13 +138,19 @@ EOF
 like($benign, qr!^HTTP/\S+ 200!,
     'bulk path: benign request+response passes both rules');
 
-# Confirm the assertions above really ran against the bulk path rather than
-# silently passing on some other one.
 my $log = $t->read_file('error.log');
 
-# libcoraza >= 1.7 is required and the bulk-header entry points are mandatory
-# symbols (ngx_http_coraza_dl_open fails to load otherwise), so a successful
-# load means the assertions above really exercised the bulk path.
+# Rule out the one path-selection cause a black-box test can rule out: the
+# bulk entry points being absent.  They are mandatory symbols, so a successful
+# load proves they resolved.
+#
+# This is a proxy, not a path trace.  It does not prove the collector
+# allocation succeeded, and under memory pressure the connector would take the
+# per-header path and still satisfy every assertion above.  That is by design:
+# the point of the assertions is that both paths inspect every header exactly
+# once, so either one passing is the correct outcome.  Distinguishing them
+# would need a pool-allocation failure injection hook, which does not exist,
+# or a log line emitted purely for the test.
 if ($log =~ /coraza: \S+ loaded via dynlib_open \(libcoraza (\d+)\.(\d+)\.\d+\)/) {
     ok($1 > 1 || ($1 == 1 && $2 >= 7),
         "libcoraza $1.$2 loaded (>= 1.7): bulk-header symbols resolved, "
