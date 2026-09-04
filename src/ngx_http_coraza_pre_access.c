@@ -94,24 +94,31 @@ static u_char ngx_http_coraza_request_body_file_chunk[
     NGX_HTTP_CORAZA_REQUEST_BODY_FILE_CHUNK_SIZE];
 
 /*
- * Submit a file-buffered request body in reusable 64 KiB chunks.
+ * Submit a file-buffered request body in reusable 64 KiB chunks.  Opening a
+ * separate descriptor keeps ngx_read_file() from changing nginx's file offset
+ * state on platforms without pread(); nginx may still need its descriptor to
+ * forward the same body upstream after inspection.
  *
- * On NGX_HAVE_PREAD platforms, ngx_read_file() issues pread() on the given
- * fd and never repositions it (see ngx_files.c), so reading through nginx's
- * own temp_file->file descriptor cannot disturb the offset nginx itself
- * uses when it later forwards the same body upstream; this skips a
- * per-request ngx_open_file()/ngx_close_file() pair. On platforms without
- * pread(), ngx_read_file() falls back to lseek()+read() and does move the
- * shared offset, so a separate descriptor is still required there.
+ * A prior version of this function tried reading through temp_file->file
+ * directly on NGX_HAVE_PREAD platforms to skip this open/close pair. That
+ * regressed: a soak test with a large chunked request body (spilling to a
+ * temp file) got short reads and 500s roughly midway through the body.
+ * pread() itself does not move the shared fd position, but ngx_read_file()
+ * unconditionally does `file->offset += n` on every read regardless of the
+ * pread/lseek branch (see ngx_files.c), and something in this request's
+ * lifecycle depends on temp_file->file.offset (also read once above, as
+ * body_size) staying at the value nginx itself wrote there -- sharing the
+ * struct let our reads corrupt that bookkeeping. A private ngx_file_t, as
+ * below, does not have this problem. Confirmed by bisection: reverting only
+ * this fd-reuse change (keeping the static chunk buffer, the dropped
+ * single_buf flag and the skipped empty-buf append) made the soak pass
+ * again; the pread row alone reproduced it.
  */
 static ngx_int_t
 ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
     ngx_http_request_t *r, ngx_temp_file_t *temp_file)
 {
-#if !(NGX_HAVE_PREAD)
     ngx_file_t  file;
-#endif
-    ngx_file_t *file_ptr;
     u_char     *data;
     off_t       body_size;
     off_t       offset;
@@ -132,9 +139,6 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-#if (NGX_HAVE_PREAD)
-    file_ptr = &temp_file->file;
-#else
     ngx_memzero(&file, sizeof(ngx_file_t));
     file.name = temp_file->file.name;
     file.log = r->connection->log;
@@ -147,9 +151,6 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
         ctx->intervention_triggered = 1;
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
-    file_ptr = &file;
-#endif
 
     data = ngx_http_coraza_request_body_file_chunk;
 
@@ -165,7 +166,7 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
             size = (size_t) (body_size - offset);
         }
 
-        n = ngx_read_file(file_ptr, data, size, offset);
+        n = ngx_read_file(&file, data, size, offset);
         if (n == NGX_ERROR) {
             rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
             goto done;
@@ -220,12 +221,10 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
 
 done:
 
-#if !(NGX_HAVE_PREAD)
     if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
             ngx_close_file_n " \"%V\" failed", &file.name);
     }
-#endif
 
     /*
      * NGX_DECLINED is the deliberate error_page-re-entry yield above, not a

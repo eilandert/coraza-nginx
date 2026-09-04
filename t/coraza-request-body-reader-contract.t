@@ -26,7 +26,7 @@ like($pre_access,
 	'read size is capped by the 64 KiB chunk constant');
 
 like($pre_access,
-	qr/while \(offset < body_size\).*?ngx_read_file\(file_ptr, data, size, offset\).*?coraza_append_request_body/s,
+	qr/while \(offset < body_size\).*?ngx_read_file\(&file, data, size, offset\).*?coraza_append_request_body/s,
 	'temp-file reader appends each bounded file chunk');
 
 like($pre_access,
