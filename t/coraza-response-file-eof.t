@@ -55,8 +55,16 @@ for my $dir (@needed) {
 
 plan skip_all => 'module source tree not found'
     unless defined $root;
+# CI installs libcoraza under /usr/local; a distribution package lands in
+# /usr.  Probe both so the harness is not silently skipped on either.  The
+# first hit wins deliberately -- this mirrors the linker's own search order,
+# so a host with stale headers under /usr/local and the real library under
+# /usr still compiles against the same set the linker would resolve against.
+my ($coraza_inc) = grep { -f "$_/coraza/coraza.h" }
+    qw(/usr/local/include /usr/include);
+
 plan skip_all => 'coraza headers not available'
-    unless -f '/usr/local/include/coraza/coraza.h';
+    unless defined $coraza_inc;
 
 plan tests => 3;
 
@@ -77,6 +85,19 @@ print {$fh} <<'EOF';
 
 static int force_eof;
 
+/*
+ * Physical end of the backing file.  0 means "the file is as long as the
+ * buffer claims"; a positive value models a response file truncated after
+ * buf->file_last was already recorded, so a read at or past it returns 0.
+ */
+static off_t truncate_at;
+
+/* Bytes handed to coraza_append_response_body() across the whole range. */
+static size_t appended_total;
+static int    append_calls;
+static int    append_fail;
+static int    short_read;
+
 void *
 ngx_pnalloc(ngx_pool_t *pool, size_t size)
 {
@@ -84,18 +105,75 @@ ngx_pnalloc(ngx_pool_t *pool, size_t size)
     return malloc(size);
 }
 
+void *
+ngx_alloc(size_t size, ngx_log_t *log)
+{
+    (void) log;
+    return malloc(size);
+}
+
+/*
+ * The fixture leaves buf->file->directio unset, so these are never reached;
+ * they exist only to satisfy the linker on a tree built with
+ * NGX_HAVE_ALIGNED_DIRECTIO.
+ */
+ngx_int_t
+ngx_directio_off(ngx_fd_t fd)
+{
+    (void) fd;
+    return 0;
+}
+
+ngx_int_t
+ngx_directio_on(ngx_fd_t fd)
+{
+    (void) fd;
+    return 0;
+}
+
 ssize_t
 ngx_read_file(ngx_file_t *file, u_char *buf, size_t size, off_t offset)
 {
     (void) file;
-    (void) offset;
 
     if (force_eof) {
         return 0;
     }
 
+    if (truncate_at > 0) {
+        if (offset >= truncate_at) {
+            return 0;
+        }
+
+        if (offset + (off_t) size > truncate_at) {
+            size = (size_t) (truncate_at - offset);
+        }
+    }
+
+    /*
+     * Short reads are the ordinary pread()/signal case.  Halving each read
+     * keeps the loop honest: the reader must advance by what it actually got
+     * and submit only those bytes, never the full requested size.
+     */
+    if (short_read && size > 1) {
+        size /= 2;
+    }
+
     memset(buf, 'A', size);
     return (ssize_t) size;
+}
+
+int
+coraza_append_response_body(coraza_transaction_t t, unsigned char *data,
+    int length)
+{
+    (void) t;
+    (void) data;
+
+    append_calls++;
+    appended_total += (size_t) length;
+
+    return append_fail ? -1 : 0;
 }
 
 void
@@ -111,6 +189,7 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 int
 main(void)
 {
+    ngx_http_coraza_ctx_t  ctx;
     ngx_http_request_t  request;
     ngx_connection_t    connection;
     ngx_pool_t          pool;
@@ -149,6 +228,156 @@ main(void)
         return 2;
     }
 
+    /*
+     * Bounded chunked reader, ngx_http_coraza_append_response_body_file().
+     * The range spans more than one 64 KiB chunk so the loop iterates, and
+     * the backing file is short of buf->file_last -- the shape a response
+     * temp/static file takes when it is truncated after the buffer recorded
+     * its length.  The second ngx_read_file() therefore returns 0.
+     */
+    memset(&ctx, 0, sizeof(ctx));
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.in_file = 1;
+    buffer.file = &file;
+    buffer.file_pos = 0;
+
+    /*
+     * Deliberately NOT a whole multiple of the chunk size: the final chunk is
+     * short, so the clamp's else-branch (size = file_last - offset) is
+     * exercised rather than every read being a full 64 KiB.
+     */
+    buffer.file_last = 3 * NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE + 100;
+
+    truncate_at = NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE;
+    appended_total = 0;
+    append_calls = 0;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_ERROR)
+    {
+        /* premature EOF mid-range must fail closed, not report success */
+        return 3;
+    }
+
+    if (!ctx.intervention_triggered) {
+        return 4;
+    }
+
+    /* Only the bytes that really existed were inspected. */
+    if (appended_total != NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE
+        || append_calls != 1)
+    {
+        return 5;
+    }
+
+    /* Negative control: an intact multi-chunk range succeeds in full. */
+    memset(&ctx, 0, sizeof(ctx));
+    truncate_at = 0;
+    appended_total = 0;
+    append_calls = 0;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_OK)
+    {
+        return 6;
+    }
+
+    if (appended_total
+            != (size_t) (3 * NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE
+                         + 100)
+        || append_calls != 4)
+    {
+        return 7;
+    }
+
+    /*
+     * Coraza rejects an intact chunk (append_fail): the chunked reader must
+     * fail closed and flag intervention, exercising body_filter.c:190.
+     */
+    memset(&ctx, 0, sizeof(ctx));
+    truncate_at = 0;
+    appended_total = 0;
+    append_calls = 0;
+    append_fail = 1;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_ERROR)
+    {
+        return 8;
+    }
+
+    if (!ctx.intervention_triggered) {
+        return 9;
+    }
+
+    append_fail = 0;
+
+    /*
+     * Short reads: every byte of the range must still be inspected, and the
+     * reader must advance by what ngx_read_file() returned rather than by the
+     * size it asked for.  Advancing by the requested size would skip the
+     * unread remainder past the WAF.
+     */
+    memset(&ctx, 0, sizeof(ctx));
+    truncate_at = 0;
+    appended_total = 0;
+    append_calls = 0;
+    short_read = 1;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_OK)
+    {
+        return 10;
+    }
+
+    if (appended_total
+        != (size_t) (3 * NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE + 100))
+    {
+        return 11;
+    }
+
+    short_read = 0;
+
+    /*
+     * A mid-file range: the reader must start at buf->file_pos, not at 0.
+     * Response chains routinely describe a window into a larger file.
+     */
+    memset(&ctx, 0, sizeof(ctx));
+    truncate_at = 0;
+    appended_total = 0;
+    append_calls = 0;
+
+    buffer.file_pos = NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE;
+    buffer.file_last = 3 * NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_OK)
+    {
+        return 12;
+    }
+
+    if (appended_total
+            != (size_t) (2 * NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE)
+        || append_calls != 2)
+    {
+        return 13;
+    }
+
+    /* An empty range must return early without reading anything. */
+    memset(&ctx, 0, sizeof(ctx));
+    appended_total = 0;
+    append_calls = 0;
+
+    buffer.file_pos = NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE;
+    buffer.file_last = NGX_HTTP_CORAZA_RESPONSE_BODY_FILE_CHUNK_SIZE;
+
+    if (ngx_http_coraza_append_response_body_file(&ctx, &request, &buffer)
+        != NGX_OK
+        || append_calls != 0)
+    {
+        return 14;
+    }
+
     return 0;
 }
 EOF
@@ -166,7 +395,7 @@ my @includes = map { "-I$_" } (
     "$nginx/src/http/v2",
     "$nginx/src/http/v3",
     "$nginx/objs",
-    '/usr/local/include',
+    $coraza_inc,
     "$root/src",
 );
 
@@ -175,7 +404,36 @@ is(system($cc, '-D_GNU_SOURCE', '-O2', '-ffunction-sections', '-fdata-sections',
           '-Wl,--gc-sections', '-o', $binary), 0,
     'compiled production response-file reader harness');
 
-is(system($binary), 0,
-    'premature file EOF fails closed and a complete file buffer succeeds');
-
 ok(-x $binary, 'focused harness is executable');
+
+# The harness exits with the number of the scenario that failed, so a red
+# result names the branch that regressed instead of just "non-zero".
+my %scenario = (
+    1 => 'whole-range reader: premature EOF must fail closed',
+    2 => 'whole-range reader: intact file buffer must succeed',
+    3 => 'chunked reader: premature EOF mid-range must fail closed',
+    4 => 'chunked reader: premature EOF must set intervention_triggered',
+    5 => 'chunked reader: only the bytes that existed are inspected',
+    6 => 'chunked reader: intact multi-chunk range must succeed',
+    7 => 'chunked reader: intact range inspects every 64 KiB chunk',
+    8 => 'chunked reader: Coraza-rejected chunk must fail closed',
+    9 => 'chunked reader: Coraza rejection must set intervention_triggered',
+    10 => 'chunked reader: short reads must still succeed',
+    11 => 'chunked reader: short reads must inspect every byte of the range',
+    12 => 'chunked reader: mid-file range must succeed',
+    13 => 'chunked reader: mid-file range must start at file_pos',
+    14 => 'chunked reader: empty range must return without reading',
+);
+
+my $status = system($binary);
+my $code = $status == -1 ? -1
+    : ($status & 127) ? -($status & 127)
+    : $status >> 8;
+
+is($code, 0, 'file-backed response readers fail closed on premature EOF')
+    or diag($scenario{$code}
+        ? "failing scenario $code: $scenario{$code}"
+        : "harness exited with unmapped status $status"
+            . ($status == -1 ? " (system() failed to launch: $!)"
+                : ($status & 127) ? " (killed by signal " . ($status & 127) . ")"
+                : ''));
