@@ -82,7 +82,8 @@ typedef struct {
     /* When non-NULL, ngx_http_coraza_add_response_header() collects pairs
      * here instead of making one cgo call each, so the header filter can
      * submit the whole set via coraza_add_response_headers() in a single
-     * crossing (libcoraza 1.6+).  NULL => direct per-header cgo path. */
+     * crossing.  NULL => direct per-header cgo path, taken only when the
+     * ngx_array_create() that arms the collector fails. */
     ngx_array_t *resp_hdr_collect;
 
     unsigned waiting_more_body:1;

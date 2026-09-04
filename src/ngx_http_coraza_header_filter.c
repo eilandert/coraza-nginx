@@ -76,8 +76,9 @@ ngx_http_coraza_add_response_header(ngx_http_request_t *r,
 
     /*
      * Bulk path: buffer the pair for a single coraza_add_response_headers()
-     * crossing later, rather than one cgo call per header.  The collector is
-     * armed by the header filter only when libcoraza exposes the bulk symbol.
+     * crossing later, rather than one cgo call per header.  The bulk entry
+     * points are mandatory symbols, so the header filter arms the collector
+     * unconditionally and only an allocation failure leaves it NULL.
      *
      * Copy name and value into r->pool: several resolvers synthesize their
      * value in a function-local stack buffer (Content-Length, Last-Modified,

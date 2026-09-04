@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-# Tests for the Coraza-nginx bulk-header submission path (libcoraza 1.6+).
+# Tests for the Coraza-nginx bulk-header submission path (libcoraza >= 1.7).
 #
 # The connector packs every request / response header into a single buffer and
 # hands the whole set to Coraza in one cgo crossing via
@@ -135,13 +135,8 @@ EOF
 like($benign, qr!^HTTP/\S+ 200!,
     'bulk path: benign request+response passes both rules');
 
-# Report which path the assertions above actually exercised, and make the bulk
-# path a first-class assertion when it is available. The bulk symbols exist only
-# in libcoraza >= 1.6; on an older runtime (e.g. the v1.4.0 the upstream CI still
-# pins) the connector falls back to the per-header path. Rather than accept
-# "(yes|no)" — which would let the feature under test go silently untested when
-# the symbols vanish — we branch: assert "yes" when the capability is present,
-# and SKIP explicitly (never silently pass) when it is absent.
+# Confirm the assertions above really ran against the bulk path rather than
+# silently passing on some other one.
 my $log = $t->read_file('error.log');
 
 # libcoraza >= 1.7 is required and the bulk-header entry points are mandatory
