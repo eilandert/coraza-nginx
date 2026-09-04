@@ -82,16 +82,36 @@ ngx_http_coraza_process_request_body_phase(ngx_http_coraza_ctx_t *ctx,
 
 
 /*
- * Submit a file-buffered request body in reusable 64 KiB chunks.  Opening a
- * separate descriptor keeps ngx_read_file() from changing nginx's file offset
- * state on platforms without pread(); nginx may still need its descriptor to
- * forward the same body upstream after inspection.
+ * Reusable per-worker chunk buffer for ngx_http_coraza_append_request_body_file().
+ * nginx workers are single-threaded and this function never yields to the
+ * event loop between its ngx_alloc-equivalent use and its last read (no
+ * NGX_AGAIN inside the loop; every early exit is a synchronous return up the
+ * phase-handler chain), so no two requests -- including a subrequest and its
+ * parent -- can be inside this function at once and this buffer needs no
+ * locking or per-request lifetime.
+ */
+static u_char ngx_http_coraza_request_body_file_chunk[
+    NGX_HTTP_CORAZA_REQUEST_BODY_FILE_CHUNK_SIZE];
+
+/*
+ * Submit a file-buffered request body in reusable 64 KiB chunks.
+ *
+ * On NGX_HAVE_PREAD platforms, ngx_read_file() issues pread() on the given
+ * fd and never repositions it (see ngx_files.c), so reading through nginx's
+ * own temp_file->file descriptor cannot disturb the offset nginx itself
+ * uses when it later forwards the same body upstream; this skips a
+ * per-request ngx_open_file()/ngx_close_file() pair. On platforms without
+ * pread(), ngx_read_file() falls back to lseek()+read() and does move the
+ * shared offset, so a separate descriptor is still required there.
  */
 static ngx_int_t
 ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
     ngx_http_request_t *r, ngx_temp_file_t *temp_file)
 {
+#if !(NGX_HAVE_PREAD)
     ngx_file_t  file;
+#endif
+    ngx_file_t *file_ptr;
     u_char     *data;
     off_t       body_size;
     off_t       offset;
@@ -112,6 +132,9 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+#if (NGX_HAVE_PREAD)
+    file_ptr = &temp_file->file;
+#else
     ngx_memzero(&file, sizeof(ngx_file_t));
     file.name = temp_file->file.name;
     file.log = r->connection->log;
@@ -125,12 +148,10 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    data = ngx_alloc(NGX_HTTP_CORAZA_REQUEST_BODY_FILE_CHUNK_SIZE,
-                     r->connection->log);
-    if (data == NULL) {
-        rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
-        goto done;
-    }
+    file_ptr = &file;
+#endif
+
+    data = ngx_http_coraza_request_body_file_chunk;
 
     offset = 0;
     rc = NGX_OK;
@@ -144,10 +165,10 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
             size = (size_t) (body_size - offset);
         }
 
-        n = ngx_read_file(&file, data, size, offset);
+        n = ngx_read_file(file_ptr, data, size, offset);
         if (n == NGX_ERROR) {
             rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            goto free;
+            goto done;
         }
 
         if (n == 0) {
@@ -155,7 +176,7 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
                 "coraza: file-buffered request body ended at %O of %O bytes",
                 offset, body_size);
             rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            goto free;
+            goto done;
         }
 
         if (coraza_append_request_body(ctx->coraza_transaction, data,
@@ -165,7 +186,7 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
                 "coraza: failed to append file-buffered request body chunk "
                 "for inspection");
             rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            goto free;
+            goto done;
         }
 
         offset += n;
@@ -183,30 +204,28 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
              */
             if (r->error_page) {
                 rc = NGX_DECLINED;
-                goto free;
+                goto done;
             }
             if (ret < 0) {
                 rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
-                goto free;
+                goto done;
             }
             if (ret > 0) {
                 ctx->intervention_triggered = 1;
                 rc = ret;
-                goto free;
+                goto done;
             }
         }
     }
 
-free:
-
-    ngx_free(data);
-
 done:
 
+#if !(NGX_HAVE_PREAD)
     if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
             ngx_close_file_n " \"%V\" failed", &file.name);
     }
+#endif
 
     /*
      * NGX_DECLINED is the deliberate error_page-re-entry yield above, not a
@@ -283,8 +302,18 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
 
         dd("asking for the request body, if any. Count: %d",
             r->main->count);
-        /* Ensure the full request body lands in a single buffer for inspection */
-        r->request_body_in_single_buf = 1;
+        /*
+         * request_body_in_single_buf is not set here: nginx >= 1.21.4 no
+         * longer honors it for the buffered-to-memory path (see the "TODO:
+         * honor" comment at ngx_http_request_body.c around the buffer-size
+         * computation) and h2/h3 never read it at all. Its only surviving
+         * effect on the versions that still branch on it is inflating
+         * rb->buf by the preread byte count; it does not influence the
+         * memory-vs-file decision (that is request_body_in_file_only,
+         * set below) or the number/shape of body chain links, so it has no
+         * bearing on the ngx_http_read_client_request_body() call below,
+         * which is what defeats the proxy_request_buffering-off bypass.
+         */
         r->request_body_in_persistent_file = 1;
         if (!r->request_body_in_file_only) {
             // If the above condition fails, then the flag below will have been
@@ -400,8 +429,21 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
              * upstream (a request-smuggling-style bypass). Fail closed.
              * (libcoraza signals failure with a positive sentinel, so test
              * != 0, not < 0.)
+             *
+             * A zero-length buf is skipped: coraza_append_request_body only
+             * calls Coraza's WriteRequestBody(data), a pure byte append with
+             * no end-of-body or flush semantics of its own (that signal is
+             * coraza_process_request_body, called once after this loop, not
+             * from inside it) -- appending zero bytes is a no-op on the
+             * engine's view of the body. Skipping it here only removes a
+             * wasted cgo crossing and C.GoBytes copy; the last_buf check
+             * below still runs on every buf, empty or not, so end-of-chain
+             * detection is unaffected.
              */
-            if (coraza_append_request_body(ctx->coraza_transaction, data, blen) != 0) {
+            if (blen > 0
+                && coraza_append_request_body(ctx->coraza_transaction, data,
+                                              blen) != 0)
+            {
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                     "coraza: failed to append request body chunk for inspection");
                 ctx->intervention_triggered = 1;
