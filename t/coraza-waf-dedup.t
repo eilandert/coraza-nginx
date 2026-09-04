@@ -186,10 +186,13 @@ like(http_get('/order-probe', socket => port_socket(8085)), qr/OK-F/,
 # --- The sharing itself, observed in the worker's startup log. ---
 #
 # ngx_http_coraza_init_process() logs one "loc WAF initialized" line per WAF
-# it actually builds, and one "main WAF initialized" line per worker.  Six
-# rule-bearing loc_confs reach init_process here, and before this change each
-# one compiled its own WAF: six per worker (observed).  A and B are
-# content-identical, so a correct dedup builds five.
+# it actually builds, and one "main WAF initialized" line per worker.
+#
+# Twelve rule-bearing loc_confs reach init_process: one per server plus one per
+# location, because each location inherits its server's rules pointer.  The six
+# inherited locations already share through pointer identity, so the observed
+# pre-change count was six distinct WAFs per worker.  A and B have identical
+# content in distinct arrays, so content comparison reduces that count to five.
 #
 # Normalise by the worker count: the harness may start more than one worker,
 # and init_process runs once in each.
