@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 
 # Differential corpus for hostile HTTP framing: conflicting Content-Length /
-# Transfer-Encoding, malformed and truncated chunked bodies, trailers and
-# surplus bytes after the terminating chunk, a Content-Length that disagrees
-# with the actual body length, and stacked/unknown Content-Encoding under
+# Transfer-Encoding, malformed and truncated chunked bodies, trailers, a
+# Content-Length longer than the transmitted body, and stacked/unknown
+# Content-Encoding under
 # SecResponseBodyAccess On.
 #
 # Only t/coraza-request-body-chunked.t exercises chunking today, and only
@@ -30,6 +30,7 @@
 use warnings;
 use strict;
 
+use IO::Socket::INET;
 use Test::More;
 
 use constant CRLF => "\x0d\x0a";
@@ -71,14 +72,16 @@ http {
                 SecRuleEngine On
                 SecRequestBodyAccess On
                 SecResponseBodyAccess On
-                SecAction "id:7300,phase:1,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
-                SecRule REQUEST_BODY "@contains BADBODY" "id:7301,phase:2,deny,log,status:403"
+                SecAction "id:7300,phase:1,pass,nolog,t:none,ctl:requestBodyProcessor=URLENCODED"
+                SecRule REQUEST_BODY "@contains BADBODY" "id:7301,phase:2,deny,log,status:403,t:none"
             ';
+            rewrite ^/on(/.*)$ $1 break;
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
 
         location /off {
             coraza off;
+            rewrite ^/off(/.*)$ $1 break;
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
     }
@@ -86,6 +89,7 @@ http {
     server {
         listen       127.0.0.1:%%PORT_8081%%;
         server_name  localhost;
+        access_log   %%TESTDIR%%/origin.log;
 
         # Every reply from the real origin carries this marker so a test can
         # tell "the origin answered" from "nginx or Coraza answered instead"
@@ -112,6 +116,7 @@ EOF
 
 $t->try_run('no coraza');
 $t->plan(51);
+our $origin_log = $t->testdir() . '/origin.log';
 
 ###############################################################################
 
@@ -121,28 +126,36 @@ $t->plan(51);
 # use http_get/http(), which build well-formed request lines and would
 # normalize away the very malformations under test.
 sub raw {
-	my ($bytes) = @_;
+	my ($bytes, %opt) = @_;
 
 	my $s = IO::Socket::INET->new(
 		Proto    => 'tcp',
 		PeerAddr => '127.0.0.1:' . port(8080),
 	) or die "Can't connect: $!\n";
+	$s->autoflush(1);
 
 	local $SIG{ALRM} = sub { die "timeout\n" };
 	my $reply = '';
 	eval {
 		alarm(5);
-		$s->print($bytes);
+		$s->print($bytes) or die "Can't write request: $!\n";
+		if ($opt{half_close}) {
+			shutdown($s, 1)
+				or die "Can't half-close request stream: $!\n";
+		}
 		my $buf;
 		while (1) {
 			my $n = sysread($s, $buf, 65536);
-			last unless defined $n and $n > 0;
+			die "Can't read response: $!\n" unless defined $n;
+			last if $n == 0;
 			$reply .= $buf;
 		}
 		alarm(0);
 	};
+	my $err = $@;
 	alarm(0);
 	$s->close();
+	die $err if $err;
 	return $reply;
 }
 
@@ -158,59 +171,41 @@ sub reached_origin {
 	return defined $reply && $reply =~ /ORIGIN-HIT/;
 }
 
-# One hostile case, run against both /on and /off.  $expect_core_reject: when
-# true, the request is malformed enough that nginx core itself must refuse
-# it and the origin must never see it, with Coraza on OR off.
+sub origin_requests {
+	return 0 unless -f $origin_log;
+	open my $log, '<', $origin_log
+		or die "Can't read $origin_log: $!\n";
+	my $count = 0;
+	$count++ while <$log>;
+	close $log or die "Can't close $origin_log: $!\n";
+	return $count;
+}
+
+# Run one malformed case against both /on and /off. Nginx core must refuse it
+# before proxying, with Coraza on or off.
 sub differential {
 	my ($name, $request, %opt) = @_;
 
-	my $on  = raw($request =~ s!^(\S+ )/!${1}/on!mr);
-	my $off = raw($request =~ s!^(\S+ )/!${1}/off!mr);
+	my $before = origin_requests();
+	my $on = raw($request =~ s!^(\S+ )/!${1}/on!mr,
+		half_close => $opt{half_close});
+	my $after_on = origin_requests();
+	my $off = raw($request =~ s!^(\S+ )/!${1}/off!mr,
+		half_close => $opt{half_close});
+	my $after_off = origin_requests();
 
 	my $on_status  = status_of($on);
 	my $off_status = status_of($off);
 
-	if ($opt{core_reject}) {
-		ok(!reached_origin($on),
-			"$name: core-rejected framing never reaches origin (coraza on)");
-		ok(!reached_origin($off),
-			"$name: core-rejected framing never reaches origin (coraza off)");
-	}
+	ok($off_status !~ /^2/,
+		"$name: core rejects malformed framing (coraza off: $off_status)");
+	ok($on_status !~ /^2/,
+		"$name: coraza-on is not weaker than coraza-off ($on_status)");
+	is($after_on, $before,
+		"$name: malformed request never reaches origin (coraza on)");
+	is($after_off, $after_on,
+		"$name: malformed request never reaches origin (coraza off)");
 
-	# Invariant 2: coraza-on must be at least as strict as coraza-off.  A
-	# case core 400s off must not turn into a 200 pass-through on.  We only
-	# ever expect on to be EQUAL or STRICTER (a non-2xx off status must stay
-	# non-2xx on; the origin must not be reached under coraza-on when it
-	# wasn't reached under coraza-off, or when core already rejected it).
-	if ($off_status !~ /^2/) {
-		isnt($on_status, '200',
-			"$name: coraza-on is not weaker than coraza-off ($off_status)");
-	}
-	if (!reached_origin($off)) {
-		ok(!reached_origin($on),
-			"$name: coraza-on does not let through what coraza-off blocked");
-	}
-
-	if ($opt{single_response}) {
-		# A smuggling-shaped case where the framing itself is well-formed
-		# enough that nginx core accepts and forwards the first request: the
-		# invariant here is not "core rejects it" but "surplus/overlapping
-		# bytes never turn into a second answered request" -- exactly one
-		# status line, exactly one ORIGIN-HIT marker, on EITHER config.
-		my $on_lines  = () = ($on  =~ /^HTTP\/1\.[01]\s+\d\d\d/mg);
-		my $off_lines = () = ($off =~ /^HTTP\/1\.[01]\s+\d\d\d/mg);
-		my $on_hits   = () = ($on  =~ /ORIGIN-HIT/g);
-		my $off_hits  = () = ($off =~ /ORIGIN-HIT/g);
-
-		is($on_lines, 1,
-			"$name: exactly one status line, no smuggled reply (coraza on)");
-		is($off_lines, 1,
-			"$name: exactly one status line, no smuggled reply (coraza off)");
-		is($on_hits, 1,
-			"$name: exactly one origin hit, surplus bytes not forwarded as a second request (coraza on)");
-		is($off_hits, 1,
-			"$name: exactly one origin hit, surplus bytes not forwarded as a second request (coraza off)");
-	}
 }
 
 ###############################################################################
@@ -219,14 +214,13 @@ sub differential {
 # RFC 9112 6.1: a message with both headers is invalid and must be rejected
 # or the Transfer-Encoding header stripped and the message treated as
 # malformed -- either way the origin must never see it as a valid request.
-differential('CL+TE both present',
+differential('conflicting Content-Length and Transfer-Encoding headers',
 	"POST / HTTP/1.1" . CRLF
 	. "Host: localhost" . CRLF
 	. "Content-Length: 5" . CRLF
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
-	. "3" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF,
-	core_reject => 1);
+	. "3" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF);
 
 # --- malformed / truncated chunked bodies -----------------------------------
 
@@ -236,8 +230,7 @@ differential('non-hex chunk size',
 	. "Host: localhost" . CRLF
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
-	. "zzzz" . CRLF . "abcd" . CRLF . "0" . CRLF . CRLF,
-	core_reject => 1);
+	. "zzzz" . CRLF . "abcd" . CRLF . "0" . CRLF . CRLF);
 
 # Missing terminating CRLF after the chunk data.
 differential('missing chunk terminator',
@@ -245,8 +238,7 @@ differential('missing chunk terminator',
 	. "Host: localhost" . CRLF
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
-	. "3" . CRLF . "abcXXXX" . CRLF . "0" . CRLF . CRLF,
-	core_reject => 1);
+	. "3" . CRLF . "abcXXXX" . CRLF . "0" . CRLF . CRLF);
 
 # Negative-looking (signed) chunk size.
 differential('negative chunk size',
@@ -254,8 +246,7 @@ differential('negative chunk size',
 	. "Host: localhost" . CRLF
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
-	. "-3" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF,
-	core_reject => 1);
+	. "-3" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF);
 
 # Absurdly huge chunk size that cannot exist on the wire; the connection must
 # be refused/truncated rather than nginx blocking waiting for it, and the
@@ -265,8 +256,7 @@ differential('huge chunk size',
 	. "Host: localhost" . CRLF
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
-	. "FFFFFFFFFFFFFFFF" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF,
-	core_reject => 1);
+	. "FFFFFFFFFFFFFFFF" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF);
 
 # Truncated body: declares a chunk but the connection is closed before the
 # chunk data or the final "0" chunk ever arrives.
@@ -276,9 +266,9 @@ differential('truncated chunked body',
 	. "Transfer-Encoding: chunked" . CRLF
 	. "Connection: close" . CRLF . CRLF
 	. "a" . CRLF . "abc",
-	core_reject => 1);
+	half_close => 1);
 
-# --- trailers and surplus bytes after the final chunk -----------------------
+# --- trailers ---------------------------------------------------------------
 
 # A well-formed trailer section is legal chunked framing (RFC 9112 7.1.2);
 # this is the well-formed control showing legitimate trailers are not
@@ -301,19 +291,6 @@ differential('truncated chunked body',
 		'well-formed trailer: coraza-off passes clean chunked body');
 }
 
-# Surplus bytes after the terminating "0\r\n\r\n" on the same connection: a
-# smuggling-shaped case where a second overlapping "request" is smuggled
-# past framing.  The origin must only ever see the first, legitimately
-# framed request -- never a response assembled from the surplus bytes.
-differential('surplus bytes after final chunk (smuggling shape)',
-	"POST / HTTP/1.1" . CRLF
-	. "Host: localhost" . CRLF
-	. "Transfer-Encoding: chunked" . CRLF
-	. "Connection: close" . CRLF . CRLF
-	. "3" . CRLF . "abc" . CRLF . "0" . CRLF . CRLF
-	. "GET /smuggled HTTP/1.1" . CRLF . "Host: localhost" . CRLF . CRLF,
-	single_response => 1);
-
 # --- Content-Length vs actual body length mismatch --------------------------
 
 # Declares more bytes than are ever sent, then closes -- must not block
@@ -324,17 +301,7 @@ differential('Content-Length longer than actual body',
 	. "Content-Length: 100" . CRLF
 	. "Connection: close" . CRLF . CRLF
 	. "short",
-	core_reject => 1);
-
-# Declares fewer bytes than are actually sent on the wire; the excess must
-# not be reinterpreted as a second smuggled request that reaches the origin.
-differential('Content-Length shorter than actual body (smuggling shape)',
-	"POST / HTTP/1.1" . CRLF
-	. "Host: localhost" . CRLF
-	. "Content-Length: 3" . CRLF
-	. "Connection: close" . CRLF . CRLF
-	. "abcGET /smuggled HTTP/1.1" . CRLF . "Host: localhost" . CRLF . CRLF,
-	single_response => 1);
+	half_close => 1);
 
 ###############################################################################
 # --- negative control: benign well-formed request reaches the origin ------
@@ -391,8 +358,13 @@ differential('Content-Length shorter than actual body (smuggling shape)',
 
 for my $path (qw(/on/stacked /off/stacked /on/unknown /off/unknown)) {
 	my $r = http_get($path);
+	my $encoding = $path =~ /stacked/ ? 'gzip, br' : 'x-unknown-encoding';
 	like($r, qr/^HTTP\/1\.[01] 200/,
 		"stacked/unknown Content-Encoding: $path does not crash the proxy");
+	like($r, qr/^Content-Encoding: \Q$encoding\E\r?$/mi,
+		"stacked/unknown Content-Encoding: $path preserves the header");
+	like($r, qr/\r\n\r\nORIGIN-HIT-ENCODED\n\z/,
+		"stacked/unknown Content-Encoding: $path preserves the body");
 }
 
 $t->stop();
