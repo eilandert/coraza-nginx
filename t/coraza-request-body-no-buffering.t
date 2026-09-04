@@ -72,7 +72,11 @@ http {
                 SecRuleEngine DetectionOnly
                 SecRequestBodyAccess On
                 SecAction "id:1,phase:1,pass,nolog,t:none,ctl:requestBodyProcessor=URLENCODED"
-                SecRule REQUEST_BODY "@rx BAD BODY" "id:12,phase:2,deny,log,status:403,t:none"
+                SecRule REQUEST_BODY "@rx BAD BODY" "id:12,phase:2,deny,log,auditlog,status:403,msg:\'no-buffering-detectiononly\',t:none"
+                SecAuditEngine On
+                SecAuditLogParts ABKZ
+                SecAuditLog %%TESTDIR%%/auditlog-detectiononly.txt
+                SecAuditLogType Serial
             ';
             proxy_request_buffering off;
             proxy_http_version 1.1;
@@ -109,7 +113,10 @@ like(http_req_body('POST', '/nobuffering_detectiononly', $bad_body),
 	qr/\Q$bad_body\E\z/,
 	'proxy_request_buffering off, malicious body, DetectionOnly control passes through');
 
-like($t->read_file('error.log'), qr/id "12"/,
+$t->stop();
+
+like($t->read_file('auditlog-detectiononly.txt'),
+	qr/no-buffering-detectiononly/,
 	'DetectionOnly rule evaluated the full request body');
 
 ###############################################################################
