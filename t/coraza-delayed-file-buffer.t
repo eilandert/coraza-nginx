@@ -169,25 +169,24 @@ is(length($body // ''), $cap_size,
 # assert the early-flush warning explicitly.
 #
 # NOTE: this pins the cap + intact-body behaviour on the in-memory path only.
-# It does NOT cover the file-backed clone branch this change fixes, and it
-# never will through the normal filter chain: ngx_http_copy_filter_module
-# always runs before this module's body filter (this module's own `config`
+# It does NOT cover the file-backed clone branch this change fixes. In this
+# test, ngx_http_copy_filter_module runs before this module's body filter (this
+# module's own `config`
 # build script places it, via ngx_module_order, ahead of the copy filter in
 # nginx's module list -- which for the ngx_http_top_body_filter wrap chain
 # means copy_filter's postconfiguration runs *later* and therefore wraps as
-# the *first*-called filter). Copy filter resolves every file buffer to
-# memory before Coraza's body filter ever runs, confirmed with an
-# instrumented local build across every producer tried, including a
+# the *first*-called filter). With sendfile off here, copy filter resolves
+# every file buffer to memory before Coraza's body filter runs, confirmed with
+# an instrumented local build across every producer tried, including a
 # multi-range request against a static file with sendfile off (the
 # strongest known candidate for repeated non-final, non-temp file buffers).
 # ngx_http_static cannot help either way (it emits the whole file as one
 # last_buf buffer: ngx_http_static_module.c sets b->file_last = of.size;
 # b->last_buf = 1), and upstream temp files are excluded by the !temp_file
-# guard. The clone branch is defensive dead code under the current filter
-# ordering; see the comment above ngx_http_coraza_read_body_data() in
-# ngx_http_coraza_body_filter.c. It is pinned by the source-shape assertion
-# near the top of this file and must stay that way until nginx/Angie or this
-# module's own module_order changes the chain.
+# guard. With sendfile enabled and no in-memory requirement, copy filter may
+# preserve file-backed buffers, so the clone branch is not assumed dead. It is
+# pinned by the source-shape assertion near the top of this file until a stable
+# runtime producer exercises the non-final shape directly.
 like($t->read_file('error.log'),
     qr/coraza: delayed response body exceeded \d+ bytes; flushing headers early/,
     'oversized delayed response tripped the delayed-body cap (in-memory path)');
