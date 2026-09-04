@@ -207,6 +207,25 @@ static ngx_inline ngx_int_t
 ngx_http_coraza_poll_after_process(ngx_http_coraza_ctx_t *ctx,
     ngx_http_request_t *r, ngx_int_t early_log, int pret)
 {
+    if (pret < 0) {
+        /*
+         * CORAZA_ERROR: the phase was not evaluated at all, so no
+         * interruption is set and the CORAZA_OK path below would wave the
+         * request through uninspected. Fail closed, the same disposition the
+         * two body call sites already take via
+         * ngx_http_coraza_process_body_failed() before they get here.
+         *
+         * Unreachable on libcoraza 1.7.0, whose
+         * coraza_process_{request,response}_headers return only CORAZA_OK or
+         * CORAZA_INTERRUPTION (coraza.go:380-387, 482-489). It is here so
+         * that an error return added upstream later is a 500 rather than a
+         * silent skip.
+         */
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+            "coraza: rule phase processing failed (%d)", pret);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     if (pret != CORAZA_INTERRUPTION)
     {
         /* No rule interrupted this phase: nothing to fetch. */
