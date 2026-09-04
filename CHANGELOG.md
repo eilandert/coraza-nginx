@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.21.1](https://github.com/eilandert/coraza-nginx/compare/v0.21.0...v0.21.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* reject premature response file EOF ([#120](https://github.com/eilandert/coraza-nginx/issues/120)) ([57ac5da](https://github.com/eilandert/coraza-nginx/commit/57ac5da6f48c1370222a3de7dd0559b27c8a2578))
+
+
+### Performance Improvements
+
+* bound file-backed response inspection ([#119](https://github.com/eilandert/coraza-nginx/issues/119)) ([1706b75](https://github.com/eilandert/coraza-nginx/commit/1706b75b29f0b17fee05a59738f653999d760dc9))
+* read request tempfiles in 64 KiB chunks ([#115](https://github.com/eilandert/coraza-nginx/issues/115)) ([6efa914](https://github.com/eilandert/coraza-nginx/commit/6efa9144d0da19f124f9fbc1c41e68aacb4b0865))
+* skip inaccessible request body buffering ([#113](https://github.com/eilandert/coraza-nginx/issues/113)) ([7d268d4](https://github.com/eilandert/coraza-nginx/commit/7d268d4a819bb56d1814fa97780261a648320950))
+
 ## [0.21.0](https://github.com/corazawaf/coraza-nginx/compare/v0.20.1...v0.21.0) (2026-08-30)
 
 
