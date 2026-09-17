@@ -63,6 +63,16 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 	 * intervention's existence -- never from its ->status, which only
 	 * selects HOW to block and is 0 for a bare `drop`.
 	 *
+	 * That premise is an API-level guarantee, not an empirical observation:
+	 * libcoraza's coraza_intervention() returns NULL iff
+	 * tx.Interruption() == nil (libcoraza coraza.go), and coraza/v3 only
+	 * populates an interruption from tx.Interrupt(), which no non-disruptive
+	 * action calls and which SecRuleEngine DetectionOnly suppresses outright.
+	 * The whole function rests on this, so if a future libcoraza ever
+	 * allocates an intervention for a non-disruptive reason, this dispatch
+	 * must grow an explicit disruptive test rather than keep treating
+	 * existence as the signal.
+	 *
 	 * ->disruptive is not a usable signal either: libcoraza 1.7.0 leaves it
 	 * 0 even for a plain `deny,status:403`.
 	 *
