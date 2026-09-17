@@ -29,7 +29,7 @@ static ngx_int_t ngx_http_coraza_init_process(ngx_cycle_t *cycle);
 static void ngx_http_coraza_exit_process(ngx_cycle_t *cycle);
 
 ngx_inline ngx_int_t
-ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_request_t *r, ngx_int_t early_log)
+ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_request_t *r, ngx_int_t early_log, ngx_int_t phase_site)
 {
 	coraza_intervention_t *intervention;
 	ngx_int_t              status;
@@ -118,7 +118,7 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 		 * producing a normal response.  Conflating the two is what made
 		 * ->status unusable as a block signal in the first place.
 		 *
-		 * All seven call sites read the flag: the four rule-phase sites
+		 * All eight call sites read the flag: the five rule-phase sites
 		 * via ngx_http_coraza_phase_status(), the three filter sites via
 		 * ngx_http_coraza_drop_connection().  Why the two groups need
 		 * different teardowns is documented at the latter.
@@ -147,8 +147,32 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 	}
 
 	/*
-	 * Update status code for audit logging, using the status the client
-	 * will actually be served so the audit record agrees with the wire.
+	 * Settle the status the client will ACTUALLY be served, before it is
+	 * recorded or logged, so the audit record agrees with the wire.
+	 *
+	 * This is the one place that answers "what will the client get?".  It
+	 * has to be settled here rather than in the caller, because the audit
+	 * record and the error-log line below are written here: deciding the
+	 * servable status afterwards -- as ngx_http_coraza_phase_status() alone
+	 * used to -- recorded the rule's raw status while the wire carried the
+	 * remapped one, which is exactly the "denied with code N, served M"
+	 * mismatch this connector exists to avoid.
+	 *
+	 * The remap is correct only for the rule-PHASE sites, so the caller
+	 * declares which kind of site it is.  A phase handler's return value
+	 * goes to ngx_http_finalize_request(), which cannot serve a sub-300
+	 * status; the FILTER sites finalize through
+	 * ngx_http_special_response_handler(), where a 200 is an unknown code
+	 * with err = 0 and nginx writes a well-formed zero-body 200.  Hoisting
+	 * the remap unconditionally would therefore change filter-site
+	 * behaviour that is already correct.  ngx_http_coraza_servable_status()
+	 * holds the predicate so the two sites cannot drift.
+	 *
+	 * ngx_http_coraza_phase_status() still applies the same remap on the
+	 * value returned below; it is idempotent, and keeping it there means a
+	 * phase site's return value is right even though the status has already
+	 * been settled here.
+	 *
 	 * Note: on error_page redirects the audit log will have the status
 	 * code but may lack response headers.
 	 *
@@ -166,6 +190,10 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 	 * is the action name plus ctx->drop_connection -- so recording it here
 	 * cannot be confused with an operator's own `deny,status:444`.
 	 */
+	if (phase_site && !ctx->drop_connection) {
+		status = ngx_http_coraza_servable_status(status);
+	}
+
 	coraza_update_status_code(ctx->coraza_transaction, (int) status);
 
 	if (ctx->transaction_id.len > 0) {
@@ -247,14 +275,53 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 }
 
 /*
+ * The remap predicate itself, in one place.
+ *
+ * Both ngx_http_coraza_process_intervention() -- which records the status for
+ * the audit log and prints the "Access denied with code %d" line -- and
+ * ngx_http_coraza_phase_status() -- which produces a phase handler's return
+ * value -- must agree on what a rule-phase site can actually serve.  When they
+ * disagreed, the audit record and the wire disagreed with them: a
+ * `deny,status:200` was logged as 200 and served as 403.  Sharing the
+ * predicate is what makes that class of drift impossible rather than merely
+ * absent today.
+ *
+ * Idempotent by construction: NGX_HTTP_FORBIDDEN is >= NGX_HTTP_SPECIAL_RESPONSE,
+ * so applying it to an already-remapped status returns it unchanged.  That is
+ * relied on -- process_intervention() settles the status and phase_status()
+ * then runs over the same value again.
+ *
+ * `drop` is NOT passed through here by either caller: it is routed on
+ * ctx->drop_connection, and its NGX_HTTP_CLOSE (444) is >= 300 in any case.
+ */
+ngx_int_t
+ngx_http_coraza_servable_status(ngx_int_t status)
+{
+	/*
+	 * Statuses ngx_http_finalize_request() cannot serve from a phase
+	 * handler: everything below NGX_HTTP_SPECIAL_RESPONSE except the two
+	 * it special-cases.  See the rationale above.
+	 */
+	if (status > 0
+		&& status < NGX_HTTP_SPECIAL_RESPONSE
+		&& status != NGX_HTTP_CREATED
+		&& status != NGX_HTTP_NO_CONTENT)
+	{
+		return NGX_HTTP_FORBIDDEN;
+	}
+
+	return status;
+}
+
+/*
  * Map a positive intervention status onto the value a rule-PHASE handler
- * returns, making the `drop` disposition explicit at every one of the four
+ * returns, making the `drop` disposition explicit at every one of the five
  * phase sites and keeping every other disposition servable there.
  *
- * All seven intervention call sites read the same drop signal --
+ * All eight intervention call sites read the same drop signal --
  * ctx->drop_connection -- rather than three of them reading a flag and the
- * other four reading the number 444.  The three FILTER sites route a drop
- * through ngx_http_coraza_drop_connection(); the four phase sites route it
+ * other five reading the number 444.  The three FILTER sites route a drop
+ * through ngx_http_coraza_drop_connection(); the five phase sites route it
  * through here.
  *
  * The value returned for a drop is NGX_HTTP_CLOSE, exactly what
@@ -318,19 +385,12 @@ ngx_http_coraza_phase_status(ngx_http_coraza_ctx_t *ctx, ngx_int_t ret)
 	}
 
 	/*
-	 * Statuses ngx_http_finalize_request() cannot serve from a phase
-	 * handler: everything below NGX_HTTP_SPECIAL_RESPONSE except the two
-	 * it special-cases.  See the rationale above.
+	 * Normally a no-op: process_intervention() already settled this value
+	 * for a phase site, and the predicate is idempotent.  It stays here so
+	 * a phase handler's return value is correct on its own terms rather
+	 * than by trusting a caller flag set elsewhere.
 	 */
-	if (ret > 0
-		&& ret < NGX_HTTP_SPECIAL_RESPONSE
-		&& ret != NGX_HTTP_CREATED
-		&& ret != NGX_HTTP_NO_CONTENT)
-	{
-		return NGX_HTTP_FORBIDDEN;
-	}
-
-	return ret;
+	return ngx_http_coraza_servable_status(ret);
 }
 
 void ngx_http_coraza_cleanup(void *data)

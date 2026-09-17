@@ -314,7 +314,7 @@ ngx_http_coraza_rewrite_handler(ngx_http_request_t *r)
 
         pret = coraza_process_request_headers(ctx->coraza_transaction);
         dd("Processing intervention with the request headers information filled in");
-        ret = ngx_http_coraza_poll_after_process(ctx, r, 1, pret);
+        ret = ngx_http_coraza_poll_after_process(ctx, r, 1, pret, 1);
         if (r->error_page) {
             return NGX_DECLINED;
             }
