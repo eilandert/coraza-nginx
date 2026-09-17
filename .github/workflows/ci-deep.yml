@@ -474,7 +474,29 @@ jobs:
           cd "nginx-${NGINX_VERSION}"
           CC=gcc ./configure --with-compat --with-debug \
             --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
+          # bear only records compilations it actually OBSERVES. If the addon
+          # objects already exist (cache restore, incremental tree, a retried
+          # step) `make modules` is a no-op, bear captures nothing, and the DB
+          # has no entry for src/*.c — which makes the clang-tidy gate below
+          # pass while analysing nothing. Force a from-scratch compile of every
+          # addon TU so the capture is real. Deliberately no ccache/no mold
+          # (see the NOTE above): the point is a genuine compiler invocation.
+          # Delete the OBJECTS only, never the directories: ./configure creates
+          # objs/addon/src/ and the generated Makefile never recreates it, so
+          # `rm -rf objs/addon` makes the very next `make modules` die with
+          # "can't create objs/addon/src/....o: No such file or directory".
+          find objs -name '*.o' -delete 2>/dev/null || true
           bear --output "$GITHUB_WORKSPACE/compile_commands.json" -- make modules
+          # Assert the capture actually covers every TU the gate must analyse.
+          # An empty or entry-less DB is a hard error, never a silent pass.
+          if [ ! -s "$GITHUB_WORKSPACE/compile_commands.json" ]; then
+            echo "FATAL: bear produced no compile_commands.json" >&2
+            exit 1
+          fi
+          # Absolute path: cwd is the extracted nginx tree at this point (the
+          # `cd` above), not the repository checkout.
+          python3 "$GITHUB_WORKSPACE/.github/scripts/assert-compile-db.py" \
+            "$GITHUB_WORKSPACE/compile_commands.json" "$GITHUB_WORKSPACE"/src/*.c
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
       - name: flawfinder (gating)
         run: |
@@ -485,12 +507,53 @@ jobs:
         run: |
           set -uo pipefail
           FAIL=0
+          ANALYSED=0
+          EXPECTED=0
           for f in "$GITHUB_WORKSPACE"/src/*.c; do
-            clang-tidy -p "$GITHUB_WORKSPACE" "$f" \
+            # Guard the unmatched-glob case: bash would otherwise hand the
+            # literal pattern to clang-tidy as a filename. The EXPECTED==0
+            # check below is what actually fails the job in that situation.
+            [ -e "$f" ] || continue
+            EXPECTED=$((EXPECTED + 1))
+            out="$(clang-tidy -p "$GITHUB_WORKSPACE" "$f" \
               --warnings-as-errors='cert-*,clang-analyzer-security.*' \
               --checks='-*,cert-*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
-              2>&1 | tee -a clang-tidy.log || FAIL=1
+              2>&1)"
+            rc=$?
+            printf '%s\n' "$out" | tee -a clang-tidy.log
+            # clang-tidy EXITS 0 when the DB loads but holds no entry for this
+            # TU: it prints "Skipping <file>. Compile command not found." and
+            # analyses nothing. That silent-success case is what made this gate
+            # vacuous, and it is the one an entry-less bear capture produces.
+            # Verified against clang-tidy 19.1.7 with an empty-array DB: rc=0.
+            # (A missing/unloadable DB, or a DB covering only other TUs, already
+            # exits non-zero -- matched here too so the reason is explicit
+            # rather than incidental.)
+            NO_CMD_RE='Skipping .*\. Compile command not found\.'
+            NO_CMD_RE="$NO_CMD_RE"'|Could not auto-detect compilation database'
+            NO_CMD_RE="$NO_CMD_RE"'|No compilation database found'
+            if printf '%s' "$out" | grep -qE "$NO_CMD_RE"; then
+              echo "FATAL: clang-tidy skipped $f (no compile command) — gate cannot vouch for it" >&2
+              FAIL=1
+              continue
+            fi
+            # Analysed means "clang-tidy actually inspected this TU", which is
+            # true whether or not it reported a finding. Counting only clean
+            # TUs here would make a genuine cert-* hit print as a coverage gap.
+            ANALYSED=$((ANALYSED + 1))
+            if [ "$rc" -ne 0 ]; then
+              FAIL=1
+            fi
           done
+          echo "clang-tidy analysed $ANALYSED/$EXPECTED translation unit(s)"
+          if [ "$ANALYSED" -ne "$EXPECTED" ]; then
+            echo "FATAL: clang-tidy analysed $ANALYSED of $EXPECTED TUs" >&2
+            FAIL=1
+          fi
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "FATAL: no src/*.c to analyse — gate would pass vacuously" >&2
+            FAIL=1
+          fi
           [ "$FAIL" -eq 0 ]
       - name: semgrep (gating)
         run: |
