@@ -662,7 +662,7 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
     ctx->response_body_processable =
         ngx_http_coraza_is_response_body_processable(ctx->coraza_transaction);
 
-    ret = ngx_http_coraza_poll_after_process(ctx, r, 0, pret);
+    ret = ngx_http_coraza_poll_after_process(ctx, r, 0, pret, 0);
     if (r->error_page) {
         return ngx_http_next_header_filter(r);
     }

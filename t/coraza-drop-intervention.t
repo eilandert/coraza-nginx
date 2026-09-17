@@ -61,7 +61,7 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(35);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(37);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -622,6 +622,33 @@ unlike($errlog, qr/Access denied with code 0\b/,
 # actually enforced (444, nginx's "connection closed without response").
 like($errlog, qr/Access denied with code 444\b/,
 	'a dropped request is logged as denied with the status it was blocked with');
+
+# --- the audit record must agree with the wire -------------------------------
+#
+# The point of this whole file is that what the operator reads in the log is
+# what the client actually got.  A phase-site `deny,status:200` is served as a
+# 403 (ngx_http_finalize_request() cannot put a sub-300 status on the wire from
+# a phase handler -- see the /deny200-p1 case above, which asserts the wire
+# side).  The connector must therefore RECORD 403 too.
+#
+# Regression pinned: the remap used to happen in
+# ngx_http_coraza_phase_status(), i.e. AFTER
+# ngx_http_coraza_process_intervention() had already called
+# coraza_update_status_code() and emitted this line with the rule's raw status.
+# The client got 403 while the audit log and the error log both said 200 --
+# the same "logged a block that does not match what was served" defect as the
+# original "Access denied with code 0", just with a different number.
+#
+# Both `status:200` rules in this file (ids 8101 and 8115) are phase:1, and no
+# filter-site rule here carries a sub-300 status, so a "code 200" line can only
+# be this mismatch.  Filter-site behaviour is deliberately unchanged: a
+# `deny,status:200` there really is served as a zero-body 200 by
+# ngx_http_special_response_handler(), and would legitimately log 200.
+unlike($errlog, qr/Access denied with code 200\b/,
+	'no phase-site deny is logged with a status the client was not served');
+
+like($errlog, qr/Access denied with code 403\b/,
+	'a phase-site deny,status:200 is logged with the 403 it was served as');
 
 # Drop one known-benign nginx-core UBSan diagnostic before the crash gate.
 #

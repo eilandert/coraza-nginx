@@ -266,6 +266,16 @@ connector therefore serves such a `deny` as **403** in the request phases, so
 the block always reaches the client as a real response. 201 and 204 are passed
 through unchanged, and response-phase filters serve any status verbatim.
 
+The audit log follows the wire, not the rule: a request-phase `deny,status:200`
+is recorded with `RESPONSE_STATUS` **403** -- the status the client was
+actually served -- and the connector's error-log line reads
+`Access denied with code 403`. The rule's own `status:200` is not what was put
+on the wire, so it is not what is recorded; the rule id and message in the
+audit record still identify which rule blocked. At the **response-phase filter**
+sites the same `deny,status:200` really is served as a zero-body `200`, and
+there it is recorded as `200`. In every case the recorded status is the status
+the client received.
+
 ## Configuration merging
 
 Rules defined at a higher-level context (`http`, `server`) are automatically
