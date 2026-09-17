@@ -722,6 +722,22 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
      *     form of this is already excluded above; these two statuses are the
      *     status-code form.  See t/coraza-delayed-not-modified.t.
      *
+     *     Only the 304 half has end-to-end coverage, and that is a property of
+     *     nginx rather than a gap in the tests: 304 is produced by
+     *     ngx_http_not_modified_filter, a header filter ABOVE this one, so it
+     *     rewrites headers_out.status after the static handler has already
+     *     committed to streaming a body -- which is exactly the race being
+     *     guarded.  Nothing in stock nginx sets headers_out.status to 204 from
+     *     a filter: ngx_http_static_handler hard-codes 200, `return 204` and a
+     *     204 from ngx_http_dav_module are handler return codes that go through
+     *     ngx_http_send_special_response with no body at all, proxied 204s have
+     *     u->length forced to 0 above this module, and an `error_page =204`
+     *     redirect is already rejected by the !r->error_page conjunct above.
+     *     So NGX_HTTP_NO_CONTENT is defensive depth for a third-party or future
+     *     single-call handler, not a branch reachable from this test suite.
+     *     Every route was tried against an unpatched build and none leaked a
+     *     body; do not re-attempt a 204 wire test without a fixture module.
+     *
      *   - 206 Partial Content: ngx_http_range_body_filter sits ABOVE this
      *     module, so a single-call handler's body passes it before the range
      *     HEADER filter has created its context.  The body is never sliced,
