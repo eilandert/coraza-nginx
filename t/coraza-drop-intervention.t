@@ -61,7 +61,7 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(29);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(35);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -222,6 +222,52 @@ http {
             coraza_rules '
                 SecRuleEngine On
                 SecRule RESPONSE_HEADERS:X-Probe "@streq bad" "id:8114,phase:3,deny,status:444,log,msg:\'deny444-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # --- deny,status:200 at a rule PHASE --------------------------------
+        #
+        # The /deny200 case above probes this rule over `Connection: close`,
+        # where "blocked" and "wrote nothing and kept the socket" are
+        # indistinguishable -- an empty reply satisfies both.  This location
+        # exists to be probed over a KEPT-ALIVE pipelined pair instead.
+        #
+        # A phase handler returns the mapped status straight into
+        # ngx_http_finalize_request().  For rc == 200 that value is not
+        # >= NGX_HTTP_SPECIAL_RESPONSE (300) and is neither NGX_HTTP_CREATED
+        # (201) nor NGX_HTTP_NO_CONTENT (204), so it misses the special-response
+        # block entirely, sets r->done = 1 and falls through to
+        # ngx_http_finalize_connection() -- zero bytes written and the socket
+        # returned to keep-alive state.  The client gets a hung/empty reply on
+        # a reusable connection rather than a clean block.
+        #
+        # The connector now maps such a status to 403 at the phase sites, so
+        # the assertion is that a real 403 response comes back.
+        location /deny200-p1 {
+            coraza on;
+            coraza_rules '
+                SecRuleEngine On
+                SecRule ARGS:x "@streq bad" "id:8115,phase:1,deny,status:200,log,msg:\'deny200-p1-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # --- deny,status:444 at a rule PHASE --------------------------------
+        #
+        # The /deny444-p3 case above is a FILTER site, where 444 is served as
+        # an ordinary zero-body response.  A PHASE site is different: the raw
+        # 444 reaches ngx_http_finalize_request(), where NGX_HTTP_CLOSE is
+        # special-cased inside the rc >= NGX_HTTP_SPECIAL_RESPONSE block and
+        # tears the connection down exactly like `drop`.  That is accepted as
+        # correct -- 444 is nginx's own "close without response" convention --
+        # and this case pins it so the two sites' divergence is deliberate and
+        # observed rather than assumed.
+        location /deny444-p1 {
+            coraza on;
+            coraza_rules '
+                SecRuleEngine On
+                SecRule ARGS:x "@streq bad" "id:8116,phase:1,deny,status:444,log,msg:\'deny444-p1-probe\',t:none"
             ';
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
@@ -491,6 +537,61 @@ like($deny444, qr!^HTTP/!,
 unlike($deny444, qr!ORIGIN-REACHED!,
 	'deny,status:444 still blocks the origin body');
 
+# --- deny,status:200 at a rule PHASE, over a KEPT-ALIVE connection -----------
+#
+# The /deny200 probe earlier in this file uses `Connection: close`, where an
+# empty reply is indistinguishable from a proper block -- so the defect this
+# case pins passed green there.  Here the pair is pipelined on one socket:
+# both requests are written before anything is read, so nginx has request 2
+# buffered when it decides what to do with request 1.
+#
+# Broken behaviour: rc == 200 misses ngx_http_finalize_request()'s
+# special-response block (not >= 300, not 201, not 204), so nothing is ever
+# written and the connection is returned to keep-alive state.  The first reply
+# is empty and the SECOND request is then answered normally -- zero bytes for
+# the block, a live socket afterwards.
+#
+# Correct behaviour: a `deny` whose status cannot be served as a special
+# response is mapped to 403, so request 1 gets a real, well-formed 403 body.
+my ($deny200_p1_first, $deny200_p1_second) =
+	raw_get_keepalive_pair('/deny200-p1?x=bad');
+
+isnt($deny200_p1_first, '',
+	'deny,status:200 at a phase site writes a response rather than nothing');
+like($deny200_p1_first, qr!^HTTP/\S+ 403!,
+	'deny,status:200 at a phase site is served as a 403 block');
+unlike($deny200_p1_first, qr!ORIGIN-REACHED!,
+	'deny,status:200 at a phase site does not return the origin response');
+
+# The socket is deliberately still probed for reuse.  A 403 from
+# ngx_http_special_response_handler() leaves the connection usable, so the
+# second reply is expected to arrive -- this asserts the pipelined probe is
+# live and that an empty FIRST reply above would have been nginx's choice
+# rather than a dead socket or a race.
+like($deny200_p1_second, qr!^HTTP/!,
+	'the pipelined reuse probe is live after a phase-site deny,status:200');
+
+# --- deny,status:444 at a rule PHASE -----------------------------------------
+#
+# Deliberately NOT the same as the filter-site /deny444-p3 case above.  At a
+# phase site the raw 444 is NGX_HTTP_CLOSE and ngx_http_finalize_request()
+# tears the connection down with nothing written -- identical to `drop`.  That
+# is accepted: 444 is nginx's own "close without response" convention, so an
+# operator writing `deny,status:444` in a request phase is asking for exactly
+# that.  This pins the behaviour rather than leaving it unverified, and the
+# README and the ngx_http_coraza_phase_status() comment are written to match.
+#
+# Note 444 >= NGX_HTTP_SPECIAL_RESPONSE, so it is untouched by the sub-300
+# remap that the deny,status:200 case above exercises.
+my ($deny444_p1_first) = raw_get_keepalive_pair('/deny444-p1?x=bad');
+
+is($deny444_p1_first, '',
+	'deny,status:444 at a phase site closes the connection without a response');
+
+my $deny444_p1 = raw_get('/deny444-p1?x=bad');
+unlike($deny444_p1, qr!ORIGIN-REACHED!,
+	'deny,status:444 at a phase site does not return the origin response');
+
 $t->stop();
 
 ###############################################################################
@@ -521,6 +622,44 @@ unlike($errlog, qr/Access denied with code 0\b/,
 # actually enforced (444, nginx's "connection closed without response").
 like($errlog, qr/Access denied with code 444\b/,
 	'a dropped request is logged as denied with the status it was blocked with');
+
+# Drop one known-benign nginx-core UBSan diagnostic before the crash gate.
+#
+# The deny,status:200 keep-alive case above pipelines a second request that
+# nginx actually parses -- the first test in this suite to do so, because the
+# other pipelined probes drop the connection before request 2 is read. Parsing
+# a request method goes through ngx_http_parse.c's ngx_str3_cmp(), which is a
+# deliberate unaligned `*(uint32_t *) m` load compiled in only when
+# NGX_HAVE_NONALIGNED says the platform allows it. UBSan's alignment check
+# reports it as "runtime error: load of misaligned address ... for type
+# 'uint32_t'", and coraza_crash_check's $CRASH_RE matches any "runtime error:".
+#
+# This is nginx core, not this module: the identical diagnostic reproduces
+# from a pipelined pair against a plain `return 200` location with the coraza
+# module not loaded at all. It cannot be turned off at runtime either --
+# UBSan's check selection is a compile-time flag, and GCC's runtime honours
+# neither UBSAN_OPTIONS=alignment=0 nor a suppressions file for it.
+#
+# So exactly this one line is filtered, matched on both the check and the
+# nginx source file that raises it, and only ngx_http_parse.c is allowed. Any
+# other runtime error, any sanitizer report from the connector, and every
+# crash signal still reach the assertion unchanged. The shared helper is left
+# alone so no other test's gate is weakened.
+{
+	my $log = $t->read_file('error.log');
+	$log = '' unless defined $log;
+
+	my $filtered = join '', grep {
+		$_ !~ m{^src/http/ngx_http_parse\.c:\d+:\d+:
+			\sruntime\serror:\sload\sof\smisaligned\saddress
+			\s\S+\sfor\stype\s'uint32_t'}x
+	} split /(?<=
+)/, $log;
+
+	if ($filtered ne $log) {
+		$t->write_file('error.log', $filtered);
+	}
+}
 
 coraza_crash_check::assert_no_crash($t,
 	'no crash handling drop and deny,status:200 interventions');

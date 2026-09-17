@@ -220,8 +220,10 @@ response rules can turn this off to restore normal header streaming.
 ## Disruptive actions and the audit log
 
 `deny` serves a response: the status comes from `status:`, or 403 when the
-rule does not set one. A redirect action (`redirect:`, statuses 301, 302, 303,
-307, 308) serves a body-less response carrying the `Location` header.
+rule does not set one (see the phase-dependent notes below for statuses nginx
+cannot serve from a request phase). A redirect action (`redirect:`, statuses
+301, 302, 303, 307, 308) serves a body-less response carrying the `Location`
+header.
 
 `drop` does not serve anything. The connection is torn down and the client
 receives no response at all -- no status line, no headers, no body -- which is
@@ -234,10 +236,35 @@ indistinguishable from a request the engine never reached.
 
 That means a bare `drop` and an explicit `deny,status:444` both appear in the
 audit log with `RESPONSE_STATUS` 444, and the status alone does not tell them
-apart. They behave differently on the wire -- `deny,status:444` serves a
-normal zero-body 444 response and the connection may be kept alive, while
-`drop` closes it with nothing sent. To disambiguate, read the rule id and the
-action recorded in the same audit record rather than the status.
+apart. To disambiguate, read the rule id and the action recorded in the same
+audit record rather than the status.
+
+On the wire the two are not always distinguishable either, because it depends
+on which phase the rule fired in:
+
+* In a **request phase** (`phase:1`, `phase:2`) `deny,status:444` behaves
+  exactly like `drop`: the connector returns 444 to nginx's
+  `ngx_http_finalize_request()`, which special-cases that value
+  (`NGX_HTTP_CLOSE`) and tears the connection down with nothing written. This
+  is deliberate -- 444 is nginx's own convention for "close the connection
+  without a response", so a rule asking for it in a request phase gets it.
+* In a **response phase** (`phase:3`, `phase:4`) the interception happens in a
+  filter, which finalizes through `ngx_http_special_response_handler()`. That
+  function has no `NGX_HTTP_CLOSE` case, so 444 is treated as an ordinary
+  status: nginx serves a well-formed zero-body `444` response and the
+  connection may be kept alive. `drop` still closes the connection at these
+  sites, because the connector routes it through its own teardown rather than
+  through the returned status.
+
+Use `drop` when the intent is to close the connection regardless of phase.
+
+Note also that a `deny` whose `status:` is below 300 -- `deny,status:200`, for
+instance -- cannot be served as-is from a request phase: nginx only produces a
+response for statuses at or above 300 plus 201 and 204, and anything else would
+finalize with no bytes written on a connection left open for reuse. The
+connector therefore serves such a `deny` as **403** in the request phases, so
+the block always reaches the client as a real response. 201 and 204 are passed
+through unchanged, and response-phase filters serve any status verbatim.
 
 ## Configuration merging
 
