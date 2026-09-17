@@ -42,7 +42,7 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http/)->plan(5);
+my $t = Test::Nginx->new()->has(qw/http/)->plan(6);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -87,6 +87,11 @@ http {
 EOF
 
 my $BODY = 'NOT-MODIFIED-CANARY-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-END';
+# The unlike(NOT-MODIFIED-CANARY) assertion below is only meaningful while the
+# fixture actually contains that substring; if it is ever edited out the check
+# passes vacuously.  Fail loudly here instead.
+die "fixture must contain the NOT-MODIFIED-CANARY marker"
+	if index($BODY, 'NOT-MODIFIED-CANARY') < 0;
 
 $t->write_file('/delayed', $BODY);
 $t->write_file('/nodelay', $BODY);
@@ -120,6 +125,13 @@ my $c = raw_request("GET /nodelay HTTP/1.1" . CRLF
 	. "If-None-Match: $cetag" . CRLF
 	. "Connection: close" . CRLF . CRLF);
 
+# There is no "other path" marker to assert here the way the range control can
+# assert 206/Content-Range: with the delay off the 304 is simply a correct 304,
+# and a correct 304 is byte-for-byte what the fixed delayed path also produces.
+# The one thing worth pinning is that this control really revalidated, so the
+# zero-body check cannot pass against a 200 whose body happened to be absent.
+like($c, qr!^HTTP/1\.1 304!,
+	'negative control (delay off): really revalidated to 304');
 is(body_bytes($c), 0,
 	'negative control (delay off): 304 carries zero body bytes');
 
