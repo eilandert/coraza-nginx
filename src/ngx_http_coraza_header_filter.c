@@ -706,11 +706,45 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
      * minutes or hours on a real event stream, i.e. the client gets nothing
      * (issue #81).  See ngx_http_coraza_is_sse_response() above for the
      * security trade-off this accepts.
+     *
+     * Finally, we skip the statuses that carry no content at all.  Returning
+     * NGX_OK here skips every header filter below this module at
+     * ngx_http_send_header() time; they run later, from
+     * ngx_http_coraza_forward_header().  Two of those deferrals corrupt the
+     * response framing:
+     *
+     *   - 304 Not Modified / 204 No Content: content handlers read
+     *     r->header_only only AFTER ngx_http_send_header() returns, and it is
+     *     nginx's own final header filter -- skipped here -- that sets it.
+     *     The static handler therefore streams the file for a response that
+     *     must transfer no content at all (RFC 9110 section 15.4.5), and the
+     *     delayed flush emits those headers followed by a body.  The HEAD
+     *     form of this is already excluded above; these two statuses are the
+     *     status-code form.  See t/coraza-delayed-not-modified.t.
+     *
+     *   - 206 Partial Content: ngx_http_range_body_filter sits ABOVE this
+     *     module, so a single-call handler's body passes it before the range
+     *     HEADER filter has created its context.  The body is never sliced,
+     *     and the range header filter then stamps 206 + Content-Range + a
+     *     short Content-Length onto a full-length body -- a response-framing
+     *     desync.  A status test cannot catch this one, because the status is
+     *     still 200 when this filter runs; the range header filter promotes it
+     *     to 206 later.  So clear r->allow_ranges (and r->single_range) before
+     *     delaying, which tells that filter to leave the response whole.  See
+     *     t/coraza-delayed-range.t.
+     *
+     * Note this deliberately does NOT restrict the delay to 200 OK.  Phase-4
+     * rules must still be able to intercept a redirect or an origin 401/403
+     * before its headers reach the client, which is exactly what
+     * t/coraza-proxy.t and t/coraza-response-body-delayed-block.t cover; a
+     * status == NGX_HTTP_OK test breaks those with "header already sent".
      */
     if (mcf->delay_response_headers
         && r->method != NGX_HTTP_HEAD && !r->header_only && !r->error_page
         && r == r->main
         && r->headers_out.status != NGX_HTTP_SWITCHING_PROTOCOLS
+        && r->headers_out.status != NGX_HTTP_NO_CONTENT
+        && r->headers_out.status != NGX_HTTP_NOT_MODIFIED
         && !ngx_http_coraza_is_sse_response(r))
     {
         /*
@@ -721,6 +755,17 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
         if (ctx->response_body_processable) {
             r->filter_need_in_memory = 1;
         }
+
+        /*
+         * Suppress byte-range processing for this response: the range header
+         * filter runs after the body has already passed the range body
+         * filter, so a 206 it produced here would describe a body that was
+         * never sliced.  Serving the entity whole is the correct, safe
+         * degradation while the headers are held.
+         */
+        r->allow_ranges = 0;
+        r->single_range = 0;
+
         ctx->headers_delayed = 1;
         ctx->pending_chain = NULL;
         ctx->pending_chain_last = &ctx->pending_chain;
