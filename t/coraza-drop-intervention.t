@@ -61,7 +61,7 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(15);
+my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(29);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -143,6 +143,88 @@ http {
             ';
             proxy_pass http://127.0.0.1:%%PORT_8081%%;
         }
+        # --- phase:3 (RESPONSE_HEADERS) bare `drop` -------------------------
+        #
+        # This is a HEADER-FILTER site, not a rule-phase handler, and it is a
+        # different code path from /drop above.  A phase handler returns
+        # NGX_HTTP_CLOSE into ngx_http_finalize_request(), which special-cases
+        # it and terminates.  The header filter instead finalizes through
+        # ngx_http_filter_finalize_request() -> ngx_http_special_response_handler(),
+        # where NGX_HTTP_CLOSE is not special at all: 444 matches none of the
+        # error-page ranges (NGX_HTTP_NGINX_CODES is 494) and nginx emits a
+        # well-formed zero-body `HTTP/1.1 444 ` response on a KEPT-ALIVE
+        # connection -- the opposite of `drop`.  The assertions below are
+        # written against that failure mode specifically.
+        location /drop-p3 {
+            coraza on;
+            coraza_rules '
+                SecRuleEngine On
+                SecRule RESPONSE_HEADERS:X-Probe "@streq bad" "id:8110,phase:3,drop,log,msg:\'drop-p3-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # phase:3 negative control: same rule, origin sends a non-matching
+        # header, so the response must come back intact.
+        location /drop-p3-control {
+            coraza on;
+            coraza_rules '
+                SecRuleEngine On
+                SecRule RESPONSE_HEADERS:X-Probe "@streq bad" "id:8111,phase:3,drop,log,msg:\'drop-p3-control-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # --- phase:4 (RESPONSE_BODY) bare `drop` ----------------------------
+        #
+        # A BODY-FILTER site, reached through
+        # ngx_http_coraza_body_filter_finalize().  Same NGX_HTTP_CLOSE problem
+        # as phase:3.  Headers are delayed here so the drop is taken on the
+        # delayed-headers branch -- the branch that would otherwise have a
+        # clean error page available and is therefore most likely to emit a
+        # tidy 444 instead of dropping.
+        location /drop-p4 {
+            coraza on;
+            coraza_delay_response_headers on;
+            coraza_rules '
+                SecRuleEngine On
+                SecResponseBodyAccess On
+                SecResponseBodyMimeType text/plain
+                SecResponseBodyLimit 65536
+                SecRule RESPONSE_BODY "@rx DROPME" "id:8112,phase:4,drop,log,msg:\'drop-p4-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # phase:4 negative control: same rule, body does not match.
+        location /drop-p4-control {
+            coraza on;
+            coraza_delay_response_headers on;
+            coraza_rules '
+                SecRuleEngine On
+                SecResponseBodyAccess On
+                SecResponseBodyMimeType text/plain
+                SecResponseBodyLimit 65536
+                SecRule RESPONSE_BODY "@rx DROPME" "id:8113,phase:4,drop,log,msg:\'drop-p4-control-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
+
+        # --- deny,status:444 must NOT be treated as a drop ------------------
+        #
+        # 444 is a status an operator can legitimately ask for with `deny`,
+        # and it is also the value NGX_HTTP_CLOSE happens to have.  Pins that
+        # the connector keys the connection teardown on the ACTION being
+        # `drop`, not on the resulting number, so this still produces an
+        # ordinary response rather than a reset.
+        location /deny444-p3 {
+            coraza on;
+            coraza_rules '
+                SecRuleEngine On
+                SecRule RESPONSE_HEADERS:X-Probe "@streq bad" "id:8114,phase:3,deny,status:444,log,msg:\'deny444-probe\',t:none"
+            ';
+            proxy_pass http://127.0.0.1:%%PORT_8081%%;
+        }
     }
 
     # The origin. Its access log is the oracle for "was the request forwarded".
@@ -154,6 +236,35 @@ http {
 
         location / {
             return 200 "ORIGIN-REACHED";
+        }
+
+        # Origin arm for the phase:3 cases: emits the response header the
+        # RESPONSE_HEADERS rule keys on. The value is taken from the query
+        # argument so the matching and control requests differ only in that
+        # one byte string and share every other code path.
+        location /drop-p3 {
+            add_header X-Probe $arg_p always;
+            return 200 "ORIGIN-REACHED";
+        }
+        location /drop-p3-control {
+            add_header X-Probe $arg_p always;
+            return 200 "ORIGIN-REACHED";
+        }
+        location /deny444-p3 {
+            add_header X-Probe $arg_p always;
+            return 200 "ORIGIN-REACHED";
+        }
+
+        # Origin arm for the phase:4 cases: the body carries the token the
+        # RESPONSE_BODY rule keys on. text/plain so it passes
+        # SecResponseBodyMimeType and is actually inspected.
+        location /drop-p4 {
+            default_type text/plain;
+            return 200 "ORIGIN-REACHED-DROPME-PAYLOAD";
+        }
+        location /drop-p4-control {
+            default_type text/plain;
+            return 200 "ORIGIN-REACHED-BENIGN-PAYLOAD";
         }
     }
 }
@@ -185,6 +296,49 @@ sub raw_get {
 	close $s;
 
 	return defined $resp ? $resp : '';
+}
+
+# Two PIPELINED keep-alive requests on ONE socket, returning both replies.
+#
+# This is the oracle that separates a real `drop` from nginx serving a tidy
+# zero-body 444: ngx_http_special_response_handler() leaves the connection
+# reusable, so the broken path answers the second request too. A dropped
+# connection cannot answer it, so the second reply is empty.
+#
+# Both requests are written before reading anything, so the second is already
+# in the socket buffer when nginx decides what to do with the first -- nginx
+# cannot "not have received it yet", and an empty second reply means the
+# connection really was torn down rather than merely slow.
+sub raw_get_keepalive_pair {
+	my ($uri) = @_;
+
+	my $s = IO::Socket::INET->new(
+		Proto => 'tcp',
+		PeerAddr => '127.0.0.1:' . port(8080),
+	) or die "Can't connect to nginx: $!\n";
+	$s->autoflush(1);
+
+	# Request 1 keeps the connection open; request 2 is the reuse probe and
+	# targets a location that is always benign, so anything coming back for
+	# it is proof the socket survived request 1.
+	print $s "GET $uri HTTP/1.1\r\n"
+		. "Host: localhost\r\n\r\n"
+		. "GET /control?x=fine HTTP/1.1\r\n"
+		. "Host: localhost\r\n"
+		. "Connection: close\r\n\r\n";
+
+	local $/ = undef;
+	my $resp = <$s>;
+	close $s;
+
+	$resp = '' unless defined $resp;
+
+	# Split on the second status line, if there is one.
+	my @parts = split /(?=HTTP\/1\.[01] )/, $resp;
+	my $first  = defined $parts[0] ? $parts[0] : '';
+	my $second = defined $parts[1] ? join('', @parts[1 .. $#parts]) : '';
+
+	return ($first, $second);
 }
 
 # --- bare `drop` -------------------------------------------------------------
@@ -241,6 +395,98 @@ like($benign, qr!^HTTP/\S+ 200!,
 	'negative control: non-matching request to the drop location returns 200');
 like($benign, qr!ORIGIN-REACHED!,
 	'negative control: non-matching request to the drop location reaches the origin');
+
+
+# --- phase:3 / phase:4 bare `drop` -------------------------------------------
+#
+# These are the two FILTER sites. They do not share the rewrite handler's
+# teardown: a phase handler hands NGX_HTTP_CLOSE to
+# ngx_http_finalize_request(), which special-cases it
+# (`if (rc == NGX_HTTP_CLOSE) { c->timedout = 1; ngx_http_terminate_request(); }`)
+# and really drops the connection. A filter finalizes through
+# ngx_http_filter_finalize_request() -> ngx_http_special_response_handler(),
+# which has no NGX_HTTP_CLOSE case at all, so 444 is handled as an ordinary
+# error status, matches none of the error-page ranges (NGX_HTTP_NGINX_CODES is
+# 494) and falls through to `err = 0`. nginx then writes a well-formed
+# zero-body response whose status line is the literal "HTTP/1.1 444 " (444 is
+# absent from ngx_http_status_lines[]) and KEEPS THE CONNECTION ALIVE.
+#
+# So the assertions are written against that exact failure mode: no status
+# line of any kind, and the connection must not survive to serve a second
+# request on the same socket.
+
+my $drop_p3 = raw_get('/drop-p3?p=bad');
+
+unlike($drop_p3, qr!ORIGIN-REACHED!,
+	'phase:3 drop does not return the origin response body');
+unlike($drop_p3, qr!^HTTP/!,
+	'phase:3 drop writes no status line at all');
+unlike($drop_p3, qr!\b444\b!,
+	'phase:3 drop does not emit a 444 status line');
+is($drop_p3, '',
+	'phase:3 drop closes the connection without sending a response');
+
+my $drop_p4 = raw_get('/drop-p4');
+
+unlike($drop_p4, qr!ORIGIN-REACHED!,
+	'phase:4 drop does not return the origin response body');
+unlike($drop_p4, qr!^HTTP/!,
+	'phase:4 drop writes no status line at all');
+unlike($drop_p4, qr!\b444\b!,
+	'phase:4 drop does not emit a 444 status line');
+is($drop_p4, '',
+	'phase:4 drop closes the connection without sending a response');
+
+# --- keep-alive reuse oracle -------------------------------------------------
+#
+# The sharpest discriminator between "dropped" and "served a tidy 444".
+# ngx_http_special_response_handler() leaves the connection reusable, so the
+# broken behaviour answers a SECOND pipelined request on the same socket. A
+# real drop cannot: the connection is gone after the first.
+
+my ($p3_first, $p3_second) = raw_get_keepalive_pair('/drop-p3?p=bad');
+
+# Assert on the FIRST reply, not merely on the absence of a second.
+#
+# Asserting only `$p3_second eq ''` would be vacuous here and was observed to
+# be so: the broken build answers request 1 with a 444 carrying
+# `Connection: close`, so it does not serve request 2 either and an
+# empty-second-reply assertion passes on BOTH the broken and the fixed build.
+# What actually differs is whether anything was written at all, so that is
+# what is asserted -- with the pipelined second request still present to prove
+# the socket was readable and the emptiness is nginx's choice, not a race.
+is($p3_first, '',
+	'phase:3 drop writes nothing even with a second request already queued');
+
+my ($p4_first, $p4_second) = raw_get_keepalive_pair('/drop-p4');
+is($p4_first, '',
+	'phase:4 drop writes nothing even with a second request already queued');
+
+# --- phase:3 / phase:4 negative controls -------------------------------------
+#
+# Same locations, same rules, non-matching data. Proves the assertions above
+# are the rule firing and not the location being broken in a way that would
+# close every connection.
+
+my $p3_ok = raw_get('/drop-p3-control?p=fine');
+like($p3_ok, qr!ORIGIN-REACHED!,
+	'negative control: non-matching phase:3 response is returned intact');
+
+my $p4_ok = raw_get('/drop-p4-control');
+like($p4_ok, qr!ORIGIN-REACHED-BENIGN-PAYLOAD!,
+	'negative control: non-matching phase:4 response is returned intact');
+
+# --- deny,status:444 is not a drop -------------------------------------------
+#
+# 444 is both a status an operator may legitimately request with `deny` and
+# the numeric value of NGX_HTTP_CLOSE. The connector must key the connection
+# teardown on the ACTION, so this one still produces an ordinary response.
+
+my $deny444 = raw_get('/deny444-p3?p=bad');
+like($deny444, qr!^HTTP/!,
+	'deny,status:444 is answered with a response, not a dropped connection');
+unlike($deny444, qr!ORIGIN-REACHED!,
+	'deny,status:444 still blocks the origin body');
 
 $t->stop();
 
