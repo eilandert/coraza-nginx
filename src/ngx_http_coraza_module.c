@@ -52,89 +52,157 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 		dd("intervention action: %s", intervention->action);
 	}
 
-	if (intervention->status != 200)
+	/*
+	 * A non-NULL intervention IS the block decision.
+	 *
+	 * libcoraza only allocates an intervention when a disruptive action
+	 * fired: `allow` and `pass` yield NULL, and so does every rule under
+	 * `SecRuleEngine DetectionOnly`.  There is no such thing as a
+	 * non-blocking intervention, so blocked-ness must be derived from the
+	 * intervention's existence -- never from its ->status.
+	 *
+	 * Deriving it from ->status is what this function used to do
+	 * (`if (intervention->status != 200)`), and it let two disruptive
+	 * actions through to the origin:
+	 *
+	 *   - a bare `drop` yields status 0.  0 is NGX_OK, so every caller's
+	 *     `if (ret > 0)` test was false and the request was forwarded
+	 *     upstream -- yet this function had already logged "Access denied"
+	 *     and run the logging phase, so the operator's audit trail claimed
+	 *     a block that never happened.
+	 *   - `deny,status:200` yields status 200, which the old condition
+	 *     excluded outright, so the request was served with no audit
+	 *     record at all.
+	 *
+	 * ->disruptive is not a usable signal either: libcoraza 1.7.0 leaves it
+	 * 0 even for a plain `deny,status:403`.
+	 *
+	 * ->status only selects HOW to block, and only for `deny`.  Coraza's own
+	 * reference HTTP middleware is explicit about this (coraza/v3
+	 * http/middleware.go, obtainStatusCodeFromInterruptionOrDefault): it
+	 * honours ->status for action "deny", substituting 403 when the rule left
+	 * it 0, and ignores ->status for every other action.  That same
+	 * middleware blocks on `it != nil` and returns without ever invoking the
+	 * origin handler, which is the disposition reproduced here.
+	 *
+	 * For nginx the non-deny action that matters is `drop`, whose SecLang
+	 * meaning is "drop the connection".  It maps to NGX_HTTP_CLOSE, which
+	 * ngx_http_finalize_request() routes to ngx_http_terminate_request():
+	 * the connection is closed with no response written, exactly what `drop`
+	 * asks for.
+	 *
+	 * `deny,status:200` is still a block.  Returning 200 from a phase handler
+	 * makes ngx_http_finalize_request() mark the request done and finalize
+	 * the connection, so the origin is never reached and the client gets an
+	 * empty 200 -- the same outcome upstream's middleware produces for it.
+	 */
+	ngx_int_t status;
+
+	if (intervention->action != NULL
+		&& ngx_strcmp(intervention->action, "deny") == 0)
 	{
-		/* Update status code for audit logging. Note: on error_page redirects
-		 * the audit log will have the status code but may lack response headers. */
-		coraza_update_status_code(ctx->coraza_transaction, intervention->status);
+		status = intervention->status;
 
-		if (ctx->transaction_id.len > 0) {
-			ngx_log_error(NGX_LOG_ERR, (ngx_log_t *)r->connection->log, 0,
-				"Coraza: Access denied with code %d, unique_id \"%V\"",
-				intervention->status, &ctx->transaction_id);
-		}
-
-		if (early_log)
+		if (status == 0)
 		{
-			dd("intervention -- calling log handler manually with code: %d", intervention->status);
-			ngx_http_coraza_log_handler(r);
-			ctx->logged = 1;
+			/* Rule left the status unset; upstream's deny default. */
+			status = NGX_HTTP_FORBIDDEN;
 		}
+	}
+	else if (intervention->status != 0)
+	{
+		/*
+		 * A non-deny action carrying an explicit status: `drop,status:444`
+		 * and `redirect:...,status:302` both land here.  Honour it -- the
+		 * redirect handling below keys off it.
+		 */
+		status = intervention->status;
+	}
+	else
+	{
+		/* `drop` with no status: close the connection, send nothing. */
+		status = NGX_HTTP_CLOSE;
+	}
 
-		if (r->header_sent)
-		{
-			dd("Headers are already sent. Cannot perform the redirection at this point.");
-			coraza_free_intervention(intervention);
-			return NGX_ERROR;
-		}
+	/* Update status code for audit logging, using the status the client
+	 * will actually be served so the audit record agrees with the wire.
+	 * Note: on error_page redirects the audit log will have the status
+	 * code but may lack response headers. */
+	coraza_update_status_code(ctx->coraza_transaction, (int) status);
 
-		if (intervention->data != NULL
-			&& (intervention->status == NGX_HTTP_MOVED_PERMANENTLY
-				|| intervention->status == NGX_HTTP_MOVED_TEMPORARILY
-				|| intervention->status == NGX_HTTP_SEE_OTHER
-				|| intervention->status == NGX_HTTP_TEMPORARY_REDIRECT
-				|| intervention->status == 308))
+	if (ctx->transaction_id.len > 0) {
+		ngx_log_error(NGX_LOG_ERR, (ngx_log_t *)r->connection->log, 0,
+			"Coraza: Access denied with code %d, unique_id \"%V\"",
+			(int) status, &ctx->transaction_id);
+	}
+
+	if (early_log)
+	{
+		dd("intervention -- calling log handler manually with code: %d", (int) status);
+		ngx_http_coraza_log_handler(r);
+		ctx->logged = 1;
+	}
+
+	if (r->header_sent)
+	{
+		dd("Headers are already sent. Cannot perform the redirection at this point.");
+		coraza_free_intervention(intervention);
+		return NGX_ERROR;
+	}
+
+	if (intervention->data != NULL
+		&& (status == NGX_HTTP_MOVED_PERMANENTLY
+			|| status == NGX_HTTP_MOVED_TEMPORARILY
+			|| status == NGX_HTTP_SEE_OTHER
+			|| status == NGX_HTTP_TEMPORARY_REDIRECT
+			|| status == 308))
+	{
+		ngx_table_elt_t *h;
+		h = ngx_list_push(&r->headers_out.headers);
+		if (h != NULL)
 		{
-			ngx_table_elt_t *h;
-			h = ngx_list_push(&r->headers_out.headers);
-			if (h != NULL)
+			size_t len = ngx_strlen(intervention->data);
+			/*
+			 * Defend against response splitting / header injection.
+			 * If a rule builds the redirect target from
+			 * client-controlled data (macro expansion of a request
+			 * variable), intervention->data may contain CR/LF or other
+			 * control bytes.  nginx does not sanitize outgoing header
+			 * values, so a raw CR/LF here would let an attacker inject
+			 * extra response headers or a body.  Truncate the Location
+			 * at the first C0 control character or DEL (a legitimate
+			 * URL carries none unencoded).
+			 */
 			{
-				size_t len = ngx_strlen(intervention->data);
-				/*
-				 * Defend against response splitting / header injection.
-				 * If a rule builds the redirect target from
-				 * client-controlled data (macro expansion of a request
-				 * variable), intervention->data may contain CR/LF or other
-				 * control bytes.  nginx does not sanitize outgoing header
-				 * values, so a raw CR/LF here would let an attacker inject
-				 * extra response headers or a body.  Truncate the Location
-				 * at the first C0 control character or DEL (a legitimate
-				 * URL carries none unencoded).
-				 */
-				{
-					u_char *loc = (u_char *) intervention->data;
-					size_t safe = 0;
-					while (safe < len && loc[safe] >= 0x20 && loc[safe] != 0x7f) {
-						safe++;
-					}
-					if (safe != len) {
-						ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-							"coraza: control character in redirect target; "
-							"truncating Location to %uz byte(s)", safe);
-						len = safe;
-					}
+				u_char *loc = (u_char *) intervention->data;
+				size_t safe = 0;
+				while (safe < len && loc[safe] >= 0x20 && loc[safe] != 0x7f) {
+					safe++;
 				}
-				h->hash = 0;
-				ngx_str_set(&h->key, "Location");
-				h->value.len = 0;
-				h->value.data = ngx_pnalloc(r->pool, len);
-				if (h->value.data != NULL)
-				{
-					ngx_memcpy(h->value.data, intervention->data, len);
-					h->value.len = len;
-					h->hash = 1;
-					r->headers_out.location = h;
+				if (safe != len) {
+					ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+						"coraza: control character in redirect target; "
+						"truncating Location to %uz byte(s)", safe);
+					len = safe;
 				}
 			}
+			h->hash = 0;
+			ngx_str_set(&h->key, "Location");
+			h->value.len = 0;
+			h->value.data = ngx_pnalloc(r->pool, len);
+			if (h->value.data != NULL)
+			{
+				ngx_memcpy(h->value.data, intervention->data, len);
+				h->value.len = len;
+				h->hash = 1;
+				r->headers_out.location = h;
+			}
 		}
-
-		dd("intervention -- returning code: %d", intervention->status);
-		ngx_int_t status = intervention->status;
-		coraza_free_intervention(intervention);
-		return status;
 	}
+
+	dd("intervention -- returning code: %d", (int) status);
 	coraza_free_intervention(intervention);
-	return NGX_OK;
+	return status;
 }
 
 void ngx_http_coraza_cleanup(void *data)
