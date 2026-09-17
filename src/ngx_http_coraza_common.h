@@ -274,6 +274,9 @@ ngx_int_t ngx_http_coraza_header_filter(ngx_http_request_t *r);
 ngx_int_t ngx_http_coraza_forward_header(ngx_http_request_t *r);
 ngx_int_t ngx_http_coraza_is_redirect_status(ngx_int_t status);
 ngx_int_t ngx_http_coraza_drop_connection(ngx_http_request_t *r);
+
+/* ngx_http_coraza_module.c */
+ngx_int_t ngx_http_coraza_phase_status(ngx_http_coraza_ctx_t *ctx, ngx_int_t ret);
 void ngx_http_coraza_prepare_redirect(ngx_http_request_t *r, ngx_int_t status);
 
 /* ngx_http_coraza_log.c */

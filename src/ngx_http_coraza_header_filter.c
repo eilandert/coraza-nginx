@@ -669,9 +669,8 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
     if (ret > 0) {
         ctx->intervention_triggered = 1;
         /*
-         * `drop` must not go through ngx_http_filter_finalize_request():
-         * that would render NGX_HTTP_CLOSE as an ordinary 444 response on a
-         * kept-alive connection.  See ngx_http_coraza_drop_connection().
+         * `drop` must not go through ngx_http_filter_finalize_request().
+         * See ngx_http_coraza_drop_connection().
          */
         if (ctx->drop_connection) {
             return ngx_http_coraza_drop_connection(r);
@@ -778,8 +777,10 @@ ngx_http_coraza_is_redirect_status(ngx_int_t status)
  * A filter instead finalizes through ngx_http_filter_finalize_request(),
  * which hands the status straight to ngx_http_special_response_handler() --
  * where NGX_HTTP_CLOSE does not appear at all.  444 would be treated as an
- * ordinary error status, match none of the error-page ranges, and produce a
- * well-formed zero-body `HTTP/1.1 444 ` response on a kept-alive connection.
+ * ordinary error status, match none of the error-page ranges (the special
+ * range starts at NGX_HTTP_NGINX_CODES, 494) and fall through to `err = 0`,
+ * producing a well-formed zero-body `HTTP/1.1 444 ` response on a KEPT-ALIVE
+ * connection -- the exact opposite of `drop`, and a distinctive fingerprint.
  *
  * Calling ngx_http_finalize_request(r, NGX_HTTP_CLOSE) from here is NOT the
  * answer, even though that is the entry point the phase handlers use.  A
@@ -809,6 +810,12 @@ ngx_http_coraza_is_redirect_status(ngx_int_t status)
  * ProcessLogging still runs: ngx_http_coraza_cleanup() is registered on
  * r->pool and fires from ngx_http_free_request() during that single
  * finalize, so the audit record is written before the request goes away.
+ * Note that r->pool's cleanup chain is a DIFFERENT list from the r->cleanup
+ * chain walked above -- this module registers on the former
+ * (ngx_pool_cleanup_add(r->pool, 0), ngx_http_coraza_module.c), never on the
+ * latter, which is precisely why it is not implicated in that use-after-free:
+ * it fires from ngx_pool_destroy(r->pool) at the very end of
+ * ngx_http_free_request(), after ngx_http_log_request().
  */
 ngx_int_t
 ngx_http_coraza_drop_connection(ngx_http_request_t *r)

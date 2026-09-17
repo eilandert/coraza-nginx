@@ -325,7 +325,8 @@ ngx_http_coraza_rewrite_handler(ngx_http_request_t *r)
         }
         if (ret > 0) {
             ctx->intervention_triggered = 1;
-            return ret;
+            /* Route `drop` on the flag, not on the numeric 444. */
+            return ngx_http_coraza_phase_status(ctx, ret);
         }
     }
 
