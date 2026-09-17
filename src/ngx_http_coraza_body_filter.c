@@ -304,6 +304,23 @@ ngx_http_coraza_body_filter_finalize(ngx_http_request_t *r,
     }
 
     /*
+     * `drop` first, ahead of both exits below.
+     *
+     * Neither of them can express it.  ngx_http_filter_finalize_request()
+     * would render NGX_HTTP_CLOSE as an ordinary zero-body 444 on a
+     * kept-alive connection, and the delayed-redirect exit is irrelevant
+     * here (a drop carries no Location).  Both paths reach this point --
+     * delayed and streaming alike -- and both must terminate the connection
+     * instead, so the test sits above the was_delayed split rather than
+     * being duplicated into each branch.  The buffered chain needs no
+     * consume(): the request is terminated outright and its pool, which owns
+     * pending_chain, goes with it.  See ngx_http_coraza_drop_connection().
+     */
+    if (ctx->drop_connection) {
+        return ngx_http_coraza_drop_connection(r);
+    }
+
+    /*
      * Only the delayed path may forward the redirect itself: its headers have
      * not been sent, so the prepared status and Location still reach the wire.
      * Once headers are streaming, ngx_http_filter_finalize_request() is the
