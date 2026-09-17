@@ -762,6 +762,13 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
          * filter, so a 206 it produced here would describe a body that was
          * never sliced.  Serving the entity whole is the correct, safe
          * degradation while the headers are held.
+         *
+         * Clearing allow_ranges alone is sufficient today:
+         * ngx_http_range_header_filter() returns early on !r->allow_ranges
+         * before single_range is ever read, so the second assignment is
+         * belt-and-braces.  It is kept deliberately so that a partial revert
+         * of the allow_ranges line cannot silently re-enable range slicing on
+         * a body this filter has already let through unsliced.
          */
         r->allow_ranges = 0;
         r->single_range = 0;

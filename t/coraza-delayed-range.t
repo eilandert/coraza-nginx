@@ -42,7 +42,7 @@ use coraza_crash_check;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http/)->plan(8);
+my $t = Test::Nginx->new()->has(qw/http/)->plan(12);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -108,11 +108,13 @@ my $r = raw_request("GET /delayed HTTP/1.1" . CRLF
 	. "Connection: close" . CRLF . CRLF);
 
 # A server may always ignore Range and return the whole entity (RFC 9110
-# section 14.2), which is what the fixed delayed path does: it clears
-# r->allow_ranges rather than emitting a 206 whose body was never sliced.
-# What must never happen is a 206 that disagrees with its own body, so assert
-# a coherent status here and the framing below.
-like($r, qr!^HTTP/1\.1 20(0|6)!, 'single range: 200 OK or 206 Partial Content');
+# section 14.2), and that is exactly what the fixed delayed path does: it
+# clears r->allow_ranges, so the range header filter returns early and the
+# whole entity is served.  The status on this path is therefore deterministic,
+# not a choice: it is always 200, never 206.  A 206 here would be a 206 whose
+# body was never sliced -- the desync this file exists to exclude.
+like($r, qr!^HTTP/1\.1 200 !,
+	'single range: delayed path returns 200 with the whole entity');
 
 my ($content_length, $body) = split_response($r);
 cmp_ok(defined $content_length ? $content_length : -1, '>', 0,
@@ -127,8 +129,8 @@ $r = raw_request("GET /delayed HTTP/1.1" . CRLF
 	. "Range: bytes=0-4,10-14" . CRLF
 	. "Connection: close" . CRLF . CRLF);
 
-like($r, qr!^HTTP/1\.1 20(0|6)!,
-	'multipart range: 200 OK or 206 Partial Content');
+like($r, qr!^HTTP/1\.1 200 !,
+	'multipart range: delayed path returns 200 with the whole entity');
 
 ($content_length, $body) = split_response($r);
 is(length($body), $content_length,
@@ -149,6 +151,16 @@ $r = raw_request("GET /nodelay HTTP/1.1" . CRLF
 	. "Range: bytes=0-9" . CRLF
 	. "Connection: close" . CRLF . CRLF);
 
+# The control is only a control if it demonstrably took the OTHER path.  A
+# bare body-equals-Content-Length assertion passes identically if
+# coraza_delay_response_headers off stopped being honoured and this location
+# fell through to the delayed path -- precisely what the control excludes.
+# Pin the range path's own observables: 206 and the Content-Range it emits.
+like($r, qr!^HTTP/1\.1 206 !,
+	'negative control (delay off), single range: really took the range path (206)');
+like($r, qr!^Content-Range:\s*bytes 0-9/61\s*$!mi,
+	'negative control (delay off), single range: Content-Range describes the slice');
+
 ($content_length, $body) = split_response($r);
 is(length($body), $content_length,
 	'negative control (delay off), single range: body equals Content-Length');
@@ -157,6 +169,13 @@ $r = raw_request("GET /nodelay HTTP/1.1" . CRLF
 	. "Host: localhost" . CRLF
 	. "Range: bytes=0-4,10-14" . CRLF
 	. "Connection: close" . CRLF . CRLF);
+
+# Same reasoning as the single-range control: assert it really produced the
+# multipart shape, which the delayed path provably cannot.
+like($r, qr!^HTTP/1\.1 206 !,
+	'negative control (delay off), multipart range: really took the range path (206)');
+like($r, qr!multipart/byteranges!i,
+	'negative control (delay off), multipart range: really emitted multipart/byteranges');
 
 ($content_length, $body) = split_response($r);
 is(length($body), $content_length,
