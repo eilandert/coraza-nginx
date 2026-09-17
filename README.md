@@ -219,11 +219,16 @@ response rules can turn this off to restore normal header streaming.
 
 While headers are held, the response is served whole: byte ranges are
 suppressed, so a request carrying `Range:` receives the entire entity with a
-`200` rather than a `206`, and `Accept-Ranges` is not advertised. RFC 9110
-section 14.2 permits a server to ignore `Range`. This is required for
-correctness -- the body passes the range body filter before the delayed range
-header filter has built its context, so a `206` produced here would describe a
-body that was never sliced. Responses that carry no content at all (`204`,
+`200` rather than a `206`. RFC 9110 section 14.2 permits a server to ignore
+`Range`. This is required for correctness -- the body passes the range body
+filter before the delayed range header filter has built its context, so a
+`206` produced here would describe a body that was never sliced.
+
+For static and cached responses `Accept-Ranges` is not advertised. A
+non-cacheable proxied response may still carry an `Accept-Ranges` header
+copied from the origin; it is left in place so that clean proxied responses
+keep the origin's headers unaltered. A client acting on it receives the whole
+entity under a `200`, as above. Responses that carry no content at all (`204`,
 `304`) are likewise never delayed.
 
 Operators serving large static assets where range requests matter -- video

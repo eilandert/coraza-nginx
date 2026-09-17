@@ -779,12 +779,25 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
          * never sliced.  Serving the entity whole is the correct, safe
          * degradation while the headers are held.
          *
-         * Clearing allow_ranges alone is sufficient today:
-         * ngx_http_range_header_filter() returns early on !r->allow_ranges
-         * before single_range is ever read, so the second assignment is
-         * belt-and-braces.  It is kept deliberately so that a partial revert
-         * of the allow_ranges line cannot silently re-enable range slicing on
-         * a body this filter has already let through unsliced.
+         * This clears the flag only; it deliberately does NOT use
+         * ngx_http_clear_accept_ranges(), which would also unset an
+         * Accept-Ranges header copied from an upstream origin.  For a
+         * non-cacheable proxied response ngx_http_upstream_copy_allow_ranges()
+         * copies that header into headers_out.accept_ranges without ever
+         * setting allow_ranges, so such a response keeps advertising
+         * Accept-Ranges while we serve it whole.  That inconsistency is
+         * cosmetic -- a client that acts on it gets the full entity under a
+         * 200, which is exactly what RFC 9110 section 14.2 permits -- and
+         * suppressing it here would strip Accept-Ranges from every clean
+         * proxied response, which is a visible behaviour change well beyond
+         * this fix and is asserted against by the positive control in
+         * t/coraza-redirect-clears-entity-headers.t.
+         *
+         * single_range is belt-and-braces: ngx_http_range_header_filter()
+         * returns early on !r->allow_ranges before single_range is ever read.
+         * It is kept deliberately so that a partial revert of the
+         * allow_ranges line cannot silently re-enable range slicing on a body
+         * this filter has already let through unsliced.
          */
         r->allow_ranges = 0;
         r->single_range = 0;
