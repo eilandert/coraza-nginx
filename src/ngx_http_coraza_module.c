@@ -100,35 +100,18 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 		/*
 		 * SecLang `drop`: tear the connection down, send nothing.
 		 *
-		 * This is signalled to the callers by BOTH the NGX_HTTP_CLOSE
-		 * return value and ctx->drop_connection, because the seven call
-		 * sites do not all reach the same nginx teardown:
+		 * Signalled to the callers by ctx->drop_connection, with
+		 * NGX_HTTP_CLOSE as the accompanying status.  A dedicated flag
+		 * is used rather than re-deriving "is this a drop?" from the
+		 * returned 444, because 444 is also a status an operator can
+		 * legitimately request with `deny,status:444`, which must keep
+		 * producing a normal response.  Conflating the two is what made
+		 * ->status unusable as a block signal in the first place.
 		 *
-		 *   - The four rule-phase handlers return their status into
-		 *     ngx_http_finalize_request(), which special-cases
-		 *     NGX_HTTP_CLOSE (ngx_http_request.c: `if (rc ==
-		 *     NGX_HTTP_CLOSE) { c->timedout = 1;
-		 *     ngx_http_terminate_request(...); }`) and really does drop
-		 *     the connection.  The return value alone suffices there.
-		 *
-		 *   - The three FILTER sites do not.  They finalize via
-		 *     ngx_http_filter_finalize_request(), which calls
-		 *     ngx_http_special_response_handler() directly;
-		 *     NGX_HTTP_CLOSE appears nowhere in
-		 *     ngx_http_special_response.c, so 444 is treated as an
-		 *     ordinary error status, matches none of the error-page
-		 *     ranges (NGX_HTTP_NGINX_CODES is 494) and falls through to
-		 *     `err = 0`.  The client would then get a well-formed
-		 *     zero-body `HTTP/1.1 444 ` response on a KEPT-ALIVE
-		 *     connection -- the exact opposite of `drop`, and a
-		 *     distinctive fingerprint.
-		 *
-		 * A dedicated flag is used rather than re-deriving "is this a
-		 * drop?" from the returned 444, because 444 is also a status an
-		 * operator can legitimately request with `deny,status:444`, which
-		 * must keep producing a normal response.  Conflating the two is
-		 * what made ->status unusable as a block signal in the first
-		 * place; the flag keeps the disposition explicit.
+		 * All seven call sites read the flag: the four rule-phase sites
+		 * via ngx_http_coraza_phase_status(), the three filter sites via
+		 * ngx_http_coraza_drop_connection().  Why the two groups need
+		 * different teardowns is documented at the latter.
 		 */
 		ctx->drop_connection = 1;
 		status = NGX_HTTP_CLOSE;
@@ -251,6 +234,42 @@ ngx_http_coraza_process_intervention(ngx_http_coraza_ctx_t *ctx, ngx_http_reques
 	dd("intervention -- returning code: %d", (int) status);
 	coraza_free_intervention(intervention);
 	return status;
+}
+
+/*
+ * Map a positive intervention status onto the value a rule-PHASE handler
+ * returns, making the `drop` disposition explicit at every one of the four
+ * phase sites.
+ *
+ * All seven intervention call sites now read the same signal --
+ * ctx->drop_connection -- rather than three of them reading a flag and the
+ * other four reading the number 444.  The three FILTER sites route a drop
+ * through ngx_http_coraza_drop_connection(); the four phase sites route it
+ * through here.
+ *
+ * The value returned for a drop is unchanged: NGX_HTTP_CLOSE, exactly what
+ * ngx_http_coraza_process_intervention() already produced.  A phase handler
+ * returns it into ngx_http_finalize_request(), whose NGX_HTTP_CLOSE special
+ * case tears the connection down correctly, and that remains the mechanism.
+ * This function changes no behaviour today; it removes the latent coupling
+ * to the numeric value.  Re-deriving "is this a drop?" from a returned 444
+ * is not sound in general, because 444 is also a status an operator can ask
+ * for with `deny,status:444`, which must keep producing a normal response --
+ * only the flag distinguishes the two.  Keying the phase sites on the flag
+ * as well means a later edit that routes a phase return differently
+ * (through ngx_http_special_response_handler(), say, where an operator's
+ * `error_page 444 /x;` would match err_page[i].status == 444) has to
+ * confront the drop explicitly instead of silently degrading it to a served
+ * page.
+ */
+ngx_int_t
+ngx_http_coraza_phase_status(ngx_http_coraza_ctx_t *ctx, ngx_int_t ret)
+{
+	if (ctx->drop_connection) {
+		return NGX_HTTP_CLOSE;
+	}
+
+	return ret;
 }
 
 void ngx_http_coraza_cleanup(void *data)

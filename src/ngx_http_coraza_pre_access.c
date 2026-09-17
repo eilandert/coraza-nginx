@@ -84,7 +84,8 @@ ngx_http_coraza_process_request_body_phase(ngx_http_coraza_ctx_t *ctx,
     }
     if (ret > 0) {
         ctx->intervention_triggered = 1;
-        return ret;
+        /* Route `drop` on the flag, not on the numeric 444. */
+        return ngx_http_coraza_phase_status(ctx, ret);
     }
 
     return NGX_DECLINED;
@@ -196,7 +197,8 @@ ngx_http_coraza_append_request_body_file(ngx_http_coraza_ctx_t *ctx,
             }
             if (ret > 0) {
                 ctx->intervention_triggered = 1;
-                rc = ret;
+                /* Route `drop` on the flag, not on the numeric 444. */
+                rc = ngx_http_coraza_phase_status(ctx, ret);
                 goto done;
             }
         }
@@ -431,7 +433,8 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
             }
             if (ret > 0) {
                 ctx->intervention_triggered = 1;
-                return ret;
+                /* Route `drop` on the flag, not on the numeric 444. */
+                return ngx_http_coraza_phase_status(ctx, ret);
             }
         }
 
@@ -454,7 +457,8 @@ ngx_http_coraza_pre_access_handler(ngx_http_request_t *r)
         }
         if (ret > 0) {
             ctx->intervention_triggered = 1;
-            return ret;
+            /* Route `drop` on the flag, not on the numeric 444. */
+            return ngx_http_coraza_phase_status(ctx, ret);
         }
 
         return ngx_http_coraza_process_request_body_phase(ctx, r);

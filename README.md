@@ -217,6 +217,28 @@ ready, which means a late phase-4 intervention can no longer replace a response
 whose headers have already gone out. Operators whose ruleset has no phase-4
 response rules can turn this off to restore normal header streaming.
 
+## Disruptive actions and the audit log
+
+`deny` serves a response: the status comes from `status:`, or 403 when the
+rule does not set one. A redirect action (`redirect:`, statuses 301, 302, 303,
+307, 308) serves a body-less response carrying the `Location` header.
+
+`drop` does not serve anything. The connection is torn down and the client
+receives no response at all -- no status line, no headers, no body -- which is
+what SecLang `drop` asks for. Because nothing is written to the wire, there is
+no response status for the audit record to agree with, so the audit log
+records `RESPONSE_STATUS` 444: nginx's own convention for "connection closed
+without response", and the same value the error log line reports. It is not 0,
+because 0 is what an unevaluated transaction looks like and would make a drop
+indistinguishable from a request the engine never reached.
+
+That means a bare `drop` and an explicit `deny,status:444` both appear in the
+audit log with `RESPONSE_STATUS` 444, and the status alone does not tell them
+apart. They behave differently on the wire -- `deny,status:444` serves a
+normal zero-body 444 response and the connection may be kept alive, while
+`drop` closes it with nothing sent. To disambiguate, read the rule id and the
+action recorded in the same audit record rather than the status.
+
 ## Configuration merging
 
 Rules defined at a higher-level context (`http`, `server`) are automatically

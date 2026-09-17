@@ -444,12 +444,14 @@ is($drop_p4, '',
 # broken behaviour answers a SECOND pipelined request on the same socket. A
 # real drop cannot: the connection is gone after the first.
 
-my ($p3_first, $p3_second) = raw_get_keepalive_pair('/drop-p3?p=bad');
+# Only the first reply is bound: the second is deliberately not examined,
+# for the reason spelled out below.
+my ($p3_first) = raw_get_keepalive_pair('/drop-p3?p=bad');
 
 # Assert on the FIRST reply, not merely on the absence of a second.
 #
-# Asserting only `$p3_second eq ''` would be vacuous here and was observed to
-# be so: the broken build answers request 1 with a 444 carrying
+# Asserting only that the second reply is empty would be vacuous here, and was
+# observed to be so: the broken build answers request 1 with a 444 carrying
 # `Connection: close`, so it does not serve request 2 either and an
 # empty-second-reply assertion passes on BOTH the broken and the fixed build.
 # What actually differs is whether anything was written at all, so that is
@@ -458,7 +460,8 @@ my ($p3_first, $p3_second) = raw_get_keepalive_pair('/drop-p3?p=bad');
 is($p3_first, '',
 	'phase:3 drop writes nothing even with a second request already queued');
 
-my ($p4_first, $p4_second) = raw_get_keepalive_pair('/drop-p4');
+# Only the first reply is bound; see the phase:3 case above.
+my ($p4_first) = raw_get_keepalive_pair('/drop-p4');
 is($p4_first, '',
 	'phase:4 drop writes nothing even with a second request already queued');
 
