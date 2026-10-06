@@ -41,13 +41,16 @@ RUN set -eux; \
   libc-dev \
   make \
   openssl \
+  libssl-dev \
   curl \
   gnupg \
   wget \
   libpcre2-dev \
-  zlib1g-dev
+  zlib1g-dev \
+  python3
 
 COPY . /usr/src/coraza-nginx
+COPY ci/configure_module.py /tmp/ci/configure_module.py
 
 # Download sources
 RUN set -eux; \
@@ -55,9 +58,8 @@ RUN set -eux; \
     # Reuse same cli arguments as the nginx:alpine image used to build
 
 RUN set -eux; \
-    CONFARGS=$(nginx -V 2>&1 | sed -n -e 's/^.*arguments: //p');\
     cd /usr/src/nginx-$NGINX_VERSION; \
-    ./configure --with-compat "$CONFARGS" --add-dynamic-module=/usr/src/coraza-nginx; \
+    python3 /tmp/ci/configure_module.py ./configure /usr/src/coraza-nginx; \
     make modules; \
     mkdir -p /usr/lib/nginx/modules; \
     find objs/*.so -print; \
@@ -88,4 +90,3 @@ RUN apt-get update -qq && \
     export TEST_NGINX_BINARY=/usr/sbin/nginx && \
     export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
     prove -v coraza*.t 2>&1 || true
-

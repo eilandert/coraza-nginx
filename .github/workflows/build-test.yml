@@ -77,6 +77,10 @@ jobs:
         if: matrix.full_tests
         run: prove lint/*.t
 
+      - name: Test Docker configure argument replay
+        if: matrix.full_tests
+        run: python3 -m unittest discover -s ci -p 'test_configure_module.py'
+
       - name: Load version pins
         run: bash .github/scripts/load-versions.sh
 
