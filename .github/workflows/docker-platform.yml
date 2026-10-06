@@ -1,0 +1,43 @@
+---
+name: Docker platform
+'on':
+  pull_request:
+    paths:
+      - Dockerfile
+      - ci/check-image-platform.sh
+      - ci/docker-platform-smoke.sh
+      - ci/docker-platform-cases.sh
+      - .github/workflows/docker-platform.yml
+  workflow_dispatch: {}
+permissions: {}
+concurrency:
+  group: docker-platform-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build target image and inspect its runtime
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          # yamllint disable-line rule:line-length
+          BINFMT_IMAGE: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+        run: |
+          set -euo pipefail
+          # arm64 deliberately builds on amd64 to exercise differing platforms.
+          docker run --privileged --rm "$BINFMT_IMAGE" --install arm64
+          docker build --load --platform "linux/$TARGET_ARCH" \
+            --build-arg LIBCORAZA_VERSION=v1.7.0 -t coraza-platform:test .
+          bash ci/docker-platform-cases.sh \
+            "linux/$TARGET_ARCH" coraza-platform:test
