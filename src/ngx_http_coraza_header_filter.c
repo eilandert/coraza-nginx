@@ -459,8 +459,17 @@ ngx_http_coraza_header_filter(ngx_http_request_t *r)
                 ngx_http_coraza_prepare_redirect(r, rc);
                 return ngx_http_next_header_filter(r);
             }
-            return ngx_http_filter_finalize_request(r,
-                &ngx_http_coraza_module, rc);
+            /* The special-response sender only stops on NGX_ERROR, not a
+             * positive status. Preserve filter finalization for that caller. */
+            if (r->err_status) {
+                return ngx_http_filter_finalize_request(r,
+                    &ngx_http_coraza_module, rc);
+            }
+            /* No headers have reached the next filter. Return the status to
+             * the caller's normal request finalization, which can retain
+             * keepalive. Filter finalization instead sets filter_finalize and
+             * returns NGX_ERROR even after generating a successful response. */
+            return rc;
         }
     }
 

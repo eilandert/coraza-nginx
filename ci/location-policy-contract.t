@@ -56,7 +56,7 @@ my $sha = Digest::SHA->new(256)->addfile($binary)->hexdigest;
 diag("binary=$binary mtime=$info[9] size=$info[7] sha256=$sha");
 for my $case (qw(different same on-off off-on off-off main-waf id
     id-error no-waf allocation connection early early-off early-engine-error
-    early-no-waf early-allocation early-connection early-interruption early-redirect
+    early-no-waf early-allocation early-connection early-interruption early-deny early-special-deny early-redirect
     early-cleanup resume redirect redirect-off logged
     header-once subrequest log-close log-id log-off log-engine-error
     log-interruption log-allocation log-no-waf log-cleanup)) {

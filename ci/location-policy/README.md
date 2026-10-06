@@ -39,7 +39,13 @@ Cases cover different and shared WAF handles, main-WAF fallback, final configure
 IDs, enabled/disabled transitions, early responses and failures, retained-context
 resumes, internal redirects, independent subrequests, and log/free counters.
 Response-header reentry and initialization errors must remain bounded. The
-headerless-exit controls check ordinary, error and interrupted engine results
+early-status cases return ordinary denial and error statuses to nginx before
+forwarding headers; they leave keepalive and filter-finalization state intact.
+The fixture then simulates normal finalizer reentry and checks that inspection
+is not replayed. This is a continuation contract, not a live keepalive test.
+An already-generated special response retains filter finalization: nginx's
+special-response sender stops on `NGX_ERROR` rather than positive statuses.
+The headerless-exit controls check ordinary, error and interrupted engine results
 without any transport activity or modification of completed response state. The
 constructor cleanup-registration failure case only checks the header caller's
 handling of an unusable result; it does not change constructor publication or

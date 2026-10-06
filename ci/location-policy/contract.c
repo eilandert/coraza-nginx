@@ -152,10 +152,13 @@ static ngx_int_t downstream(ngx_http_request_t *r)
 ngx_int_t ngx_http_filter_finalize_request(ngx_http_request_t *r, ngx_module_t *m,
     ngx_int_t status)
 {
-    check(m == &ngx_http_coraza_module && status == 500, "header failure finalization");
+    check(m == &ngx_http_coraza_module && (status == 500 || status == 403), "header failure finalization");
     finalized++;
-    /* nginx preserves the supplied module's ctx before filter reentry. */
-    return ngx_http_coraza_header_filter(r);
+    /* nginx preserves the supplied context, marks filter finalization and
+     * converts successful special-response generation into NGX_ERROR. */
+    r->filter_finalize = 1;
+    ngx_int_t rc = ngx_http_coraza_header_filter(r);
+    return rc == NGX_OK || rc == NGX_DONE ? NGX_ERROR : rc;
 }
 
 #include "ddebug.h"
@@ -186,7 +189,7 @@ int main(int argc, char **argv)
     ngx_http_request_t r = { .pool = &pool, .connection = &connection,
         .ctx = contexts, .loc_conf = locs, .main_conf = mains,
         .unparsed_uri = ngx_string("/ordinary"), .method_name = ngx_string("GET"),
-        .method = NGX_HTTP_GET, .http_version = NGX_HTTP_VERSION_11 };
+        .method = NGX_HTTP_GET, .http_version = NGX_HTTP_VERSION_11, .keepalive = 1 };
     r.main = &r;
     /* ngx_list_init allocates storage even for an empty nginx header list. */
     r.headers_in.headers.part.elts = &input_slot;
@@ -211,10 +214,13 @@ int main(int argc, char **argv)
     if (strstr(test_name, "cleanup")) { cleanup_failure = 1; }
     if (strstr(test_name, "engine-error")) { request_result = CORAZA_ERROR; }
     if (!strcmp(test_name, "log-interruption")) { request_result = CORAZA_INTERRUPTION; }
-    if (!strcmp(test_name, "early-interruption") || !strcmp(test_name, "early-redirect")) {
+    if (!strcmp(test_name, "early-interruption") || !strcmp(test_name, "early-deny")
+        || !strcmp(test_name, "early-special-deny") || !strcmp(test_name, "early-redirect")) {
         request_result = CORAZA_INTERRUPTION;
-        intervention_status = !strcmp(test_name, "early-redirect") ? 307 : 500;
+        intervention_status = !strcmp(test_name, "early-redirect") ? 307
+            : strstr(test_name, "deny") ? 403 : 500;
     }
+    if (!strcmp(test_name, "early-special-deny")) { r.err_status = 404; }
     if (!strcmp(test_name, "subrequest")) {
         static ngx_http_request_t parent;
         r.main = &parent;
@@ -253,6 +259,36 @@ int main(int argc, char **argv)
     ngx_int_t result = !strncmp(test_name, "early", 5)
         ? ngx_http_coraza_header_filter(&r) : ngx_http_coraza_pre_access_handler(&r);
     ngx_http_coraza_ctx_t *ctx = contexts[0];
+    if (!strcmp(test_name, "early-special-deny")) {
+        check(result == NGX_ERROR && finalized == 1 && r.filter_finalize
+            && forwarded == 1 && ctx && ctx->intervention_triggered,
+            "special-response caller stops original output on NGX_ERROR");
+        check(created == 1 && tx[1].waf == 20 && tx[1].headers == 1
+            && tx[1].responses == 0,
+            "special response retains final policy and guarded reentry");
+        goto cleanup;
+    }
+    if (connection_failure || !strcmp(test_name, "early-engine-error")
+        || !strcmp(test_name, "early-interruption") || !strcmp(test_name, "early-deny"))
+    {
+        check(result == (intervention_status ? intervention_status : 500),
+            "early status returns to normal request finalization");
+        check(created == 1 && ctx && tx[1].waf == 20
+            && tx[1].headers == (connection_failure ? 0 : 1),
+            "failed phase retains one settled-policy transaction");
+        if (!strncmp(test_name, "early", 5)) {
+            check(ctx && ctx->intervention_triggered && !finalized && !forwarded
+                && !r.filter_finalize && !r.header_sent && r.keepalive && !connection.error,
+                "early status leaves keepalive and unsent headers intact");
+            /* Simulate the normal finalizer's response-header reentry. */
+            check(ngx_http_coraza_header_filter(&r) == NGX_OK && forwarded == 1,
+                "normal finalizer can forward the replacement headers once");
+            check(created == 1 && tx[1].responses == 0
+                && tx[1].headers == (connection_failure ? 0 : 1),
+                "replacement response retains context without replaying inspection");
+        }
+        goto cleanup;
+    }
     if (cleanup_failure) {
         check(result == NGX_ERROR && created == 1 && tx[1].frees == 1,
             "constructor cleanup-registration failure is bounded");
@@ -271,20 +307,10 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
         check(tx[1].waf == (final.waf ? final.waf : main_conf.waf), "transaction uses final effective WAF");
-        if (connection_failure) {
-            check(result == (!strncmp(test_name, "early", 5) ? NGX_OK : 500)
-                && tx[1].headers == 0, "connection setup failure propagates");
-            if (!strncmp(test_name, "early", 5)) {
-                check(finalized == 1 && ctx->intervention_triggered,
-                    "early setup failure finalizes once");
-            }
-        } else {
+        {
             check(tx[1].headers == 1, "request headers processed exactly once");
             check(result == (!strncmp(test_name, "early", 5) ? NGX_OK : NGX_DECLINED), "normal continuation");
-            if (!strcmp(test_name, "early-engine-error") || !strcmp(test_name, "early-interruption")) {
-                check(finalized == 1 && forwarded == 1 && ctx->intervention_triggered, "engine error finalized with guarded reentry");
-                check(tx[1].responses == 0, "failed phase does not inspect response again");
-            } else if (!strcmp(test_name, "early-redirect")) {
+            if (!strcmp(test_name, "early-redirect")) {
                 check(finalized == 0 && forwarded == 1 && r.headers_out.status == 307
                     && r.header_only && ctx->intervention_triggered,
                     "early redirect is prepared before forwarding");
