@@ -15,6 +15,12 @@ jobs:
     name: Package for nginx ${{ matrix.nginx_version }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     env:
+      NGINX_VERSION: ${{ matrix.nginx_version }}
+      DEB_ARCH: ${{ matrix.deb_arch }}
+      RPM_ARCH: ${{ matrix.rpm_arch }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      NGINX_DEB_RELEASE: 1~noble
+      NGINX_RPM_RELEASE: 1.el9.ngx
       # LIBCORAZA_VERSION / LIBCORAZA_SHA256 are loaded from .github/versions.env
       # (single source of truth) in the "Load libcoraza pin" step below.
       # sha256 of nginx-1.30.3.tar.gz from nginx.org — update together with the matrix
@@ -27,17 +33,19 @@ jobs:
         arch: [amd64, arm64]
         include:
           - arch: amd64
-            runner: ubuntu-26.04
+            runner: ubuntu-24.04
             deb_arch: amd64
             rpm_arch: x86_64
           - arch: arm64
-            runner: ubuntu-26.04-arm
+            runner: ubuntu-24.04-arm
             deb_arch: arm64
             rpm_arch: aarch64
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       # Load the shared libcoraza pin so the released artifact builds against
       # the same version CI does (.github/versions.env is the single source of
@@ -48,35 +56,20 @@ jobs:
           echo "LIBCORAZA_VERSION=$LIBCORAZA_VERSION" >> "$GITHUB_ENV"
           echo "LIBCORAZA_SHA256=$LIBCORAZA_SHA256" >> "$GITHUB_ENV"
 
-      # Grab nginx source, from cache if possible, or from web
-      - name: Grab nginx-${{ matrix.nginx_version }} cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cache-nginx
-        with:
-          path: nginx-${{ matrix.nginx_version }}
-          key: nginx-${{ matrix.nginx_version }}
       - name: Download nginx
-        if: steps.cache-nginx.outputs.cache-hit != 'true'
         run: |
-          cd ${{ github.workspace }}
-          wget https://nginx.org/download/nginx-${{ matrix.nginx_version }}.tar.gz
-          echo "${NGINX_SHA256}  nginx-${{ matrix.nginx_version }}.tar.gz" | sha256sum -c -
-          tar -xzvf nginx-${{ matrix.nginx_version }}.tar.gz
+          cd "$GITHUB_WORKSPACE"
+          wget "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          echo "${NGINX_SHA256}  nginx-${NGINX_VERSION}.tar.gz" | sha256sum -c -
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
 
-      # Grab libcoraza
-      - name: Grab libcoraza-${{ env.LIBCORAZA_VERSION }} cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cache-libcoraza
-        with:
-          path: libcoraza-*
-          key: libcoraza-${{ env.LIBCORAZA_VERSION }}
       - name: Download libcoraza
-        if: steps.cache-libcoraza.outputs.cache-hit != 'true'
         run: |
-          cd ${{ github.workspace }}
-          wget https://github.com/corazawaf/libcoraza/archive/refs/tags/${{ env.LIBCORAZA_VERSION }}.zip
-          echo "${LIBCORAZA_SHA256}  ${{ env.LIBCORAZA_VERSION }}.zip" | sha256sum -c -
-          unzip -o ${{ env.LIBCORAZA_VERSION }}.zip
+          cd "$GITHUB_WORKSPACE"
+          archive_base=https://github.com/corazawaf/libcoraza/archive/refs/tags
+          wget "${archive_base}/${LIBCORAZA_VERSION}.zip"
+          echo "${LIBCORAZA_SHA256}  ${LIBCORAZA_VERSION}.zip" | sha256sum -c -
+          unzip -o "${LIBCORAZA_VERSION}.zip"
 
       # NB: no ccache / Go build-cache restore in this job. It runs only on
       # release:published with contents:write + id-token:write and emits
@@ -91,7 +84,9 @@ jobs:
           sudo apt-get -qq update
           sudo apt-get -y -qq \
           --fix-missing --no-install-recommends install \
-          gcc make ruby ruby-dev rubygems build-essential ccache eatmydata
+          gcc make ruby ruby-dev rubygems build-essential ccache eatmydata \
+          dpkg-dev rpm autoconf automake libtool diffutils unzip \
+          libpcre2-dev zlib1g-dev libssl-dev
           echo /usr/lib/ccache >> "$GITHUB_PATH"
           sudo gem install --no-document fpm
 
@@ -113,10 +108,10 @@ jobs:
 
       - name: Configure compilation of dynamic module
         run: |
-          cd ${{ github.workspace }}/nginx-${{ matrix.nginx_version }}
+          cd "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}"
           ./configure \
           --with-compat \
-          --add-dynamic-module=${{ github.workspace }}/ \
+          --add-dynamic-module="$GITHUB_WORKSPACE/" \
           --with-cc-opt='-g -O2 -fstack-protector-strong -Wformat -Werror=format-security -Wno-unused-function -fPIC -Wdate-time -D_FORTIFY_SOURCE=2' \
           --with-ld-opt='-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -fPIC' \
           --prefix=/etc/nginx \
@@ -143,23 +138,67 @@ jobs:
 
       - name: Compile dynamic module
         run: |
-          cd ${{ github.workspace }}/nginx-${{ matrix.nginx_version }}
+          cd "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}"
           eatmydata make modules
+
+      - name: Build RPM module against Rocky Linux 9
+        run: |
+          docker run --rm \
+            -e NGINX_VERSION -e LIBCORAZA_VERSION \
+            -e NGINX_SHA256 -e LIBCORAZA_SHA256 \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -v "$(go env GOROOT):/opt/go:ro" \
+            rockylinux:9 bash /src/ci/build-rpm-module.sh
 
       - name: Create packages
         run: |
+          DEB_ARCH="${DEB_ARCH:?matrix.deb_arch is required}"
+          RPM_ARCH="${RPM_ARCH:?matrix.rpm_arch is required}"
           # Strip leading 'v' from tag (e.g. v1.2.3 -> 1.2.3)
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="$RELEASE_TAG"
           VERSION="${VERSION#v}"
+          DEB_NGINX_VERSION="${NGINX_VERSION}-${NGINX_DEB_RELEASE}"
+          RPM_NGINX_VERSION="${NGINX_VERSION}-${NGINX_RPM_RELEASE}"
 
           # Populate staging directory
           mkdir -p /tmp/pkg/usr/lib/nginx/modules
           mkdir -p /tmp/pkg/usr/local/lib
-          cp ${{ github.workspace }}/nginx-${{ matrix.nginx_version }}/objs/ngx_http_coraza_module.so \
+          mkdir -p /tmp/pkg/etc/ld.so.conf.d
+          printf '%s\n' '/usr/local/lib' > \
+            /tmp/pkg/etc/ld.so.conf.d/coraza-nginx.conf
+          module_dir="$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs"
+          cp "$module_dir/ngx_http_coraza_module.so" \
              /tmp/pkg/usr/lib/nginx/modules/ngx_http_coraza_module.so
           cp /usr/local/lib/libcoraza.so /tmp/pkg/usr/local/lib/libcoraza.so
+          mkdir -p /tmp/rpm-pkg/usr/lib/nginx/modules \
+            /tmp/rpm-pkg/usr/local/lib /tmp/rpm-pkg/etc/ld.so.conf.d
+          cp rpm-output/ngx_http_coraza_module.so \
+            /tmp/rpm-pkg/usr/lib/nginx/modules/
+          cp rpm-output/libcoraza.so /tmp/rpm-pkg/usr/local/lib/
+          cp /tmp/pkg/etc/ld.so.conf.d/coraza-nginx.conf \
+            /tmp/rpm-pkg/etc/ld.so.conf.d/
 
-          PKGBASE="coraza-nginx_${VERSION}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}"
+          PKGBASE="coraza-nginx_${VERSION}_nginx${NGINX_VERSION}_${DEB_ARCH}"
+          printf '%s\n' '#!/bin/sh' 'set -e' 'ldconfig' > \
+            "$RUNNER_TEMP/coraza-ldconfig.sh"
+          chmod 755 "$RUNNER_TEMP/coraza-ldconfig.sh"
+
+          # Resolve the exact runtime libraries from both ELF objects using
+          # the target Ubuntu release's shlibs database.
+          mkdir -p debian
+          printf '%s\n' 'Source: coraza-nginx' '' \
+            'Package: coraza-nginx' 'Architecture: any' \
+            'Description: Coraza nginx dynamic module' > debian/control
+          mapfile -t DEB_LIB_DEPS < <(dpkg-shlibdeps --ignore-missing-info -O \
+            -e/tmp/pkg/usr/lib/nginx/modules/ngx_http_coraza_module.so \
+            -e/tmp/pkg/usr/local/lib/libcoraza.so \
+            2> "$RUNNER_TEMP/shlibdeps.log" \
+            | sed -n 's/^shlibs:Depends=//p' | tr ',' '\n' | sed 's/^ *//')
+          test "${#DEB_LIB_DEPS[@]}" -gt 0
+          DEB_ARGS=(--depends "nginx = ${DEB_NGINX_VERSION}")
+          for dependency in "${DEB_LIB_DEPS[@]}"; do
+            DEB_ARGS+=(--depends "$dependency")
+          done
 
           # Create .deb (Debian/Ubuntu)
           fpm -s dir -t deb \
@@ -168,7 +207,10 @@ jobs:
             --description "Coraza WAF nginx dynamic module" \
             --url "https://github.com/corazawaf/coraza-nginx" \
             --license "Apache-2.0" \
-            --architecture ${{ matrix.deb_arch }} \
+            --architecture "$DEB_ARCH" \
+            "${DEB_ARGS[@]}" \
+            --after-install "$RUNNER_TEMP/coraza-ldconfig.sh" \
+            --after-remove "$RUNNER_TEMP/coraza-ldconfig.sh" \
             --maintainer "Coraza <security@coraza.io>" \
             --vendor "Coraza" \
             -C /tmp/pkg \
@@ -182,16 +224,20 @@ jobs:
             --description "Coraza WAF nginx dynamic module" \
             --url "https://github.com/corazawaf/coraza-nginx" \
             --license "Apache-2.0" \
-            --architecture ${{ matrix.rpm_arch }} \
+            --architecture "$RPM_ARCH" \
+            --depends "nginx = 2:${RPM_NGINX_VERSION}" \
+            --rpm-autoreqprov \
+            --after-install "$RUNNER_TEMP/coraza-ldconfig.sh" \
+            --after-remove "$RUNNER_TEMP/coraza-ldconfig.sh" \
             --maintainer "Coraza <security@coraza.io>" \
             --vendor "Coraza" \
-            -C /tmp/pkg \
+            -C /tmp/rpm-pkg \
             --package "${PKGBASE}.rpm" \
             .
 
-          # Move packages to workspace for later steps
-          mv "${PKGBASE}.deb" "${{ github.workspace }}/"
-          mv "${PKGBASE}.rpm" "${{ github.workspace }}/"
+          # FPM writes into the workspace, the step's working directory.
+          test -s "${PKGBASE}.deb"
+          test -s "${PKGBASE}.rpm"
 
       - name: Upload packages as artifacts for install tests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -207,9 +253,9 @@ jobs:
 
       - name: Sign packages with cosign (keyless)
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="$RELEASE_TAG"
           VERSION="${VERSION#v}"
-          PKGBASE="coraza-nginx_${VERSION}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}"
+          PKGBASE="coraza-nginx_${VERSION}_nginx${NGINX_VERSION}_${DEB_ARCH}"
 
           cosign sign-blob --yes \
             --bundle "${PKGBASE}.deb.bundle" \
@@ -234,6 +280,9 @@ jobs:
     name: Install test (${{ matrix.pkg_type }}, nginx ${{ matrix.nginx_version }}, ${{ matrix.arch }})
     needs: package
     runs-on: ${{ matrix.runner }}
+    env:
+      NGINX_VERSION: ${{ matrix.nginx_version }}
+      PKG_ARCH: ${{ matrix.arch }}
     strategy:
       matrix:
         nginx_version: ['1.30.3']
@@ -241,11 +290,17 @@ jobs:
         pkg_type: [deb, rpm]
         include:
           - arch: amd64
-            runner: ubuntu-26.04
+            runner: ubuntu-24.04
           - arch: arm64
-            runner: ubuntu-26.04-arm
+            runner: ubuntu-24.04-arm
 
     steps:
+      - name: Checkout verification script
+        # actions/checkout v7.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
       - name: Download packages artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -253,24 +308,12 @@ jobs:
 
       - name: Test deb installation
         if: matrix.pkg_type == 'deb'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends nginx
-          sudo dpkg -i coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb
-          sudo ldconfig
-          test -f /usr/lib/nginx/modules/ngx_http_coraza_module.so
-          test -f /usr/local/lib/libcoraza.so
+        run: bash ci/package-smoke.sh deb
 
       - name: Test rpm installation
         if: matrix.pkg_type == 'rpm'
         run: |
           docker run --rm \
-            -v "$PWD:/packages:ro" \
-            rockylinux:9 \
-            bash -c "
-              dnf install -y nginx &&
-              rpm -ivh /packages/coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm &&
-              ldconfig &&
-              test -f /usr/lib/nginx/modules/ngx_http_coraza_module.so &&
-              test -f /usr/local/lib/libcoraza.so
-            "
+            -v "$GITHUB_WORKSPACE:/packages:ro" \
+            -e NGINX_VERSION -e PKG_ARCH \
+            rockylinux:9 bash /packages/ci/package-smoke.sh rpm
