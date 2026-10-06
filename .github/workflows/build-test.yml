@@ -77,6 +77,10 @@ jobs:
         if: matrix.full_tests
         run: prove lint/*.t
 
+      - name: Verify Docker test layer failures are fatal
+        if: matrix.full_tests
+        run: bash ci/docker-fatal-layer.sh
+
       - name: Load version pins
         run: bash .github/scripts/load-versions.sh
 

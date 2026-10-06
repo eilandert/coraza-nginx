@@ -17,6 +17,10 @@
 #   * 304 Not Modified -- same body-less contract, tested with the same
 #     misleading framing.
 #
+# nginx 1.28.3 stalls on this 103 fixture even with Coraza disabled. The
+# 103 case runs on nginx 1.31.3 and later; stable runs every no-body,
+# ordering, connection-close, and contamination assertion.
+#
 # Each is sent with a Content-Length that lies about a body actually being
 # present, and the 204 is additionally sent with `Transfer-Encoding: chunked`
 # framing a chunked body, so both framing forms the origin could lie with
@@ -58,7 +62,13 @@ use constant CRLF => "\x0d\x0a";
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy/)->plan(17);
+my $t = Test::Nginx->new()->has(qw/http proxy/);
+# nginx 1.28.3 waits for a 103 final response in this origin fixture even
+# with Coraza disabled. Keep the 103/reuse assertions on tested mainline
+# (1.31.3), while exercising every no-body and contamination assertion on
+# stable as well.
+my $test_103 = $t->has_version('1.31.3');
+$t->plan($test_103 ? 17 : 13);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -110,7 +120,7 @@ $t->todo_alerts();
 
 ###############################################################################
 
-# One client connection to nginx, kept open across all three cases plus a
+# One client connection to nginx, kept open across enabled cases plus a
 # trailing control request -- proves neither a stalled header delay nor
 # leftover bytes from a body-less status corrupt the NEXT response read off
 # the same connection.
@@ -123,12 +133,14 @@ $s->autoflush(1);
 
 # --- case 1: 103 Early Hints then the final response ----------------------
 
-my $r103 = client_request($s, '/early-hints');
-unlike($r103, qr/^$/, '103-then-final: response received without a delayed-header stall');
-like($r103, qr!^HTTP/1\.1 200!,
-	'103-then-final: client sees the FINAL status, not the interim 103');
-unlike($r103, qr!^HTTP/1\.1 103!m,
-	'103-then-final: the 103 status line itself is not surfaced to the client');
+if ($test_103) {
+	my $r103 = client_request($s, '/early-hints');
+	unlike($r103, qr/^$/, '103-then-final: response received without a delayed-header stall');
+	like($r103, qr!^HTTP/1\.1 200!,
+		'103-then-final: client sees the FINAL status, not the interim 103');
+	unlike($r103, qr!^HTTP/1\.1 103!m,
+		'103-then-final: the 103 status line itself is not surfaced to the client');
+}
 
 # --- case 2: 204 No Content with misleading framing ------------------------
 
@@ -157,7 +169,7 @@ unlike($r204c, qr!BADBODY|Transfer-Encoding!i,
 
 my $rctrl = client_request($s, '/plain');
 like($rctrl, qr!^HTTP/1\.1 200!,
-	'control: connection still serves a correct response after three '
+	'control: connection still serves a correct response after the '
 	. 'body-less/interim statuses (no contamination, no stall)');
 like($rctrl, qr!PLAIN-OK!,
 	'control: the plain response body is exactly the next response, not '
@@ -188,15 +200,20 @@ for my $line (@conn_log) {
 	$conn_for_uri{$uri} = $id unless exists $conn_for_uri{$uri};
 }
 
-is_deeply(\@origin_uris, [qw(
-	/early-hints /no-content /not-modified /no-content-chunked /plain
-)], 'origin received exactly the five request URIs in order');
+my @expected_uris = (
+	($test_103 ? ('/early-hints') : ()),
+	qw(/no-content /not-modified /no-content-chunked /plain)
+);
+is_deeply(\@origin_uris, \@expected_uris,
+	'origin received exactly the expected request URIs in order');
 
-is($conn_for_uri{'/no-content'} // 'missing:/no-content',
-	$conn_for_uri{'/early-hints'} // 'missing:/early-hints',
-	'103-then-final and the immediately following request are served on '
-	. 'the SAME persistent upstream connection (real reuse, not a fresh '
-	. 'connect per request)');
+if ($test_103) {
+	is($conn_for_uri{'/no-content'} // 'missing:/no-content',
+		$conn_for_uri{'/early-hints'} // 'missing:/early-hints',
+		'103-then-final and the immediately following request are served on '
+		. 'the SAME persistent upstream connection (real reuse, not a fresh '
+		. 'connect per request)');
+}
 
 isnt($conn_for_uri{'/not-modified'}, $conn_for_uri{'/no-content'},
 	'nginx closes (does not keep reusing) the connection right after an '

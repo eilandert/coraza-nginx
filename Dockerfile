@@ -74,6 +74,7 @@ COPY --from=go-builder /usr/local/lib/libcoraza.so /usr/local/lib
 RUN ldconfig -v
 
 COPY ./t /tmp/t
+COPY ./src /src
 COPY .github/versions.env .github/scripts/fetch-verify.sh /tmp/ci/
 
 RUN apt-get update -qq && \
@@ -87,5 +88,4 @@ RUN apt-get update -qq && \
     cp /tmp/t/* . && \
     export TEST_NGINX_BINARY=/usr/sbin/nginx && \
     export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
-    prove -v coraza*.t 2>&1 || true
-
+    prove -v coraza*.t 2>&1
