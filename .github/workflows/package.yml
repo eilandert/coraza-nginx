@@ -1,18 +1,42 @@
 name: Package and Release
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/package.yml
+      - ci/package-*.sh
+      - ci/test-package-publication.py
   release:
     types: [published]
 
 permissions: {}
 
 jobs:
-  package:
+  publication-contract:
     permissions:
-      contents: write   # to upload release assets
-      id-token: write   # for cosign OIDC keyless signing
+      contents: read
+    name: Package publication contract
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install YAML parser
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-yaml
+      - name: Test publication contract
+        run: python3 ci/test-package-publication.py
+
+  package:
+    if: github.event_name == 'release'
+    needs: publication-contract
+    permissions:
+      contents: read
 
     name: Package for nginx ${{ matrix.nginx_version }} (${{ matrix.arch }})
+    timeout-minutes: 240
     runs-on: ${{ matrix.runner }}
     env:
       NGINX_VERSION: ${{ matrix.nginx_version }}
@@ -247,42 +271,20 @@ jobs:
             ${{ github.workspace }}/coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb
             ${{ github.workspace }}/coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm
           retention-days: 1
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Sign packages with cosign (keyless)
-        run: |
-          VERSION="$RELEASE_TAG"
-          VERSION="${VERSION#v}"
-          PKGBASE="coraza-nginx_${VERSION}_nginx${NGINX_VERSION}_${DEB_ARCH}"
-
-          cosign sign-blob --yes \
-            --bundle "${PKGBASE}.deb.bundle" \
-            "${PKGBASE}.deb"
-
-          cosign sign-blob --yes \
-            --bundle "${PKGBASE}.rpm.bundle" \
-            "${PKGBASE}.rpm"
-
-      - name: Upload packages and signatures to release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        with:
-          files: |
-            coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb
-            coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb.bundle
-            coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm
-            coraza-nginx_*_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm.bundle
+          if-no-files-found: error
 
   install-test:
     permissions:
       contents: read
     name: Install test (${{ matrix.pkg_type }}, nginx ${{ matrix.nginx_version }}, ${{ matrix.arch }})
+    timeout-minutes: 120
     needs: package
     runs-on: ${{ matrix.runner }}
     env:
       NGINX_VERSION: ${{ matrix.nginx_version }}
       PKG_ARCH: ${{ matrix.arch }}
+      PKG_TYPE: ${{ matrix.pkg_type }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     strategy:
       matrix:
         nginx_version: ['1.30.3']
@@ -317,3 +319,86 @@ jobs:
             -v "$GITHUB_WORKSPACE:/packages:ro" \
             -e NGINX_VERSION -e PKG_ARCH \
             rockylinux:9 bash /packages/ci/package-smoke.sh rpm
+
+      - name: Record verified package digest
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          package="coraza-nginx_${VERSION}_nginx${NGINX_VERSION}_${PKG_ARCH}.${PKG_TYPE}"
+          test -s "$package"
+          sha256sum "$package" > "verified-${PKG_TYPE}.sha256"
+
+      - name: Upload verification receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-nginx${{ matrix.nginx_version }}-${{ matrix.arch }}-${{ matrix.pkg_type }}
+          path: verified-${{ matrix.pkg_type }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    permissions:
+      contents: write   # release assets
+      id-token: write   # cosign OIDC keyless signing
+    name: Sign and publish nginx ${{ matrix.nginx_version }} (${{ matrix.arch }})
+    timeout-minutes: 30
+    needs: [package, install-test]
+    runs-on: ${{ matrix.runner }}
+    env:
+      NGINX_VERSION: ${{ matrix.nginx_version }}
+      DEB_ARCH: ${{ matrix.arch }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    strategy:
+      matrix:
+        nginx_version: ['1.30.3']
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout publication gate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download tested packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packages-nginx${{ matrix.nginx_version }}-${{ matrix.arch }}
+
+      - name: Download verification receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: verified-nginx${{ matrix.nginx_version }}-${{ matrix.arch }}-*
+          merge-multiple: true
+
+      - name: Check tested package identity
+        run: bash ci/package-publication-gate.sh
+      - name: Set release package version
+        run: echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign packages with cosign (keyless)
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          PKGBASE="coraza-nginx_${VERSION}_nginx${NGINX_VERSION}_${DEB_ARCH}"
+
+          cosign sign-blob --yes \
+            --bundle "${PKGBASE}.deb.bundle" \
+            "${PKGBASE}.deb"
+
+          cosign sign-blob --yes \
+            --bundle "${PKGBASE}.rpm.bundle" \
+            "${PKGBASE}.rpm"
+
+      - name: Upload packages and signatures to release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            coraza-nginx_${{ env.RELEASE_VERSION }}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb
+            coraza-nginx_${{ env.RELEASE_VERSION }}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.deb.bundle
+            coraza-nginx_${{ env.RELEASE_VERSION }}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm
+            coraza-nginx_${{ env.RELEASE_VERSION }}_nginx${{ matrix.nginx_version }}_${{ matrix.arch }}.rpm.bundle
