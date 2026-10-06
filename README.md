@@ -329,7 +329,8 @@ If you are facing problems getting your added functionality to pass all the ngin
 
 Nginx's `--with-debug` enables nginx debug logging. To also enable the
 connector's `dd` messages, compile the module with `CORAZA_DDEBUG=1`
-(for example, pass `--with-cc-opt="-DCORAZA_DDEBUG=1"` to nginx's configure
+(for example, pass
+`--with-cc-opt="-DCORAZA_DDEBUG=1 -Wno-unused-function"` to nginx's configure
 script when building the module). Core dumps and crashes can be debugged
 in the same fashion as nginx. For further information,
 please check [nginx's debugging documentation](http://wiki.nginx.org/Debugging).
