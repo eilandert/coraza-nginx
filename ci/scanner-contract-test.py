@@ -186,6 +186,22 @@ class ScannerContract(unittest.TestCase):
             self.assertIn("src/top.c", lines[1])
             self.assertIn("src/nested dir/inner.c", lines[0])
 
+    def test_scanner_versions_run_after_failed_scanner_gates(self):
+        for workflow in ("security-scanners.yml", "ci-deep.yml"):
+            with self.subTest(workflow=workflow):
+                path = RUNNER.parent.parent / ".github/workflows" / workflow
+                steps = yaml.safe_load(path.read_text())["jobs"]["scanners"]["steps"]
+                versions = next(
+                    step for step in steps
+                    if step.get("name") == "Scanner versions and effective checks"
+                )
+                self.assertEqual(versions.get("if"), "${{ !cancelled() }}")
+                for name in ("flawfinder", "clang-tidy"):
+                    gate = next(step for step in steps if step.get("name", "").startswith(name))
+                    self.assertFalse(gate.get("continue-on-error", False), name)
+                upload = next(step for step in steps if step.get("name") == "Upload reports")
+                self.assertEqual(upload.get("if"), "always()")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

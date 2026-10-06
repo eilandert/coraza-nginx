@@ -146,6 +146,7 @@ jobs:
           exit "$status"
 
       - name: Scanner versions and effective checks
+        if: ${{ !cancelled() }}
         run: |
           mkdir -p scanner-tools
           dpkg-query -W flawfinder 'clang-tidy*' > scanner-tools/packages.txt
