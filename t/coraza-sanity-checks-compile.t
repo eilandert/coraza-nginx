@@ -15,11 +15,12 @@ use File::Temp qw/tempdir/;
 
 my $root = "$FindBin::Bin/..";
 my $nginx = $ENV{TEST_NGINX_SOURCE};
+my $ci = defined $ENV{CI} && $ENV{CI} !~ /\A(?:|0|false)\z/i;
 
 # A local run may opt out by leaving the source unset.  CI, or any explicit
 # source selection, promises compilation and must fail on missing prerequisites.
 plan skip_all => 'set TEST_NGINX_SOURCE to a configured nginx source tree'
-	unless defined $nginx || $ENV{CI};
+	unless defined $nginx || $ci;
 BAIL_OUT('TEST_NGINX_SOURCE must name a configured nginx source tree')
 	unless defined $nginx && length $nginx;
 BAIL_OUT('cc not found') unless command_exists('cc');

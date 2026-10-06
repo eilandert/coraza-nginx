@@ -63,6 +63,7 @@ SOURCE
     $ENV{TEST_NGINX_SOURCE} = "$root/absent" if $options{absent};
     $ENV{TEST_NGINX_SOURCE} = '' if $options{empty};
     $ENV{TEST_LIBCORAZA_INCLUDE} = $options{no_coraza} ? "$root/absent" : $include;
+    $ENV{CI} = $options{ci_value} if exists $options{ci_value};
     $ENV{CI} = 'true' if $options{ci};
     $ENV{PATH} = "$root/empty-bin" if $options{no_cc};
 
@@ -92,6 +93,15 @@ subtest 'unselected local run is explicitly unavailable' => sub {
     is($status, 0, 'local opt-out succeeds');
     like($output, qr/^1\.\.0 # SKIP set TEST_NGINX_SOURCE/m, 'explicit skip reason');
 };
+
+for my $value ('false', '0') {
+    subtest "CI=$value without selection is a local skip" => sub {
+        my ($status, $output) = run_fixture(unset => 1, ci_value => $value);
+        is($status, 0, 'local opt-out succeeds');
+        like($output, qr/^1\.\.0 # SKIP set TEST_NGINX_SOURCE/m,
+            'explicit skip reason');
+    };
+}
 
 for my $case (
     ['CI without selection', {ci => 1, unset => 1}, qr/TEST_NGINX_SOURCE must name/],
