@@ -94,7 +94,7 @@ subtest 'unselected local run is explicitly unavailable' => sub {
     like($output, qr/^1\.\.0 # SKIP set TEST_NGINX_SOURCE/m, 'explicit skip reason');
 };
 
-for my $value ('false', '0') {
+for my $value ('false', '0', 'off', 'TRUE', '1', '') {
     subtest "CI=$value without selection is a local skip" => sub {
         my ($status, $output) = run_fixture(unset => 1, ci_value => $value);
         is($status, 0, 'local opt-out succeeds');

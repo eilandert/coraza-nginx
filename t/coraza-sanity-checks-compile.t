@@ -15,7 +15,7 @@ use File::Temp qw/tempdir/;
 
 my $root = "$FindBin::Bin/..";
 my $nginx = $ENV{TEST_NGINX_SOURCE};
-my $ci = defined $ENV{CI} && $ENV{CI} !~ /\A(?:|0|false)\z/i;
+my $ci = defined $ENV{CI} && $ENV{CI} eq 'true';
 
 # A local run may opt out by leaving the source unset.  CI, or any explicit
 # source selection, promises compilation and must fail on missing prerequisites.
