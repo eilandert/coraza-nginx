@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.21.1](https://github.com/eilandert/coraza-nginx/compare/v0.21.0...v0.21.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* bind the transaction to the final location after rewrites ([#44](https://github.com/eilandert/coraza-nginx/issues/44)) ([5e67daa](https://github.com/eilandert/coraza-nginx/commit/5e67daa1bbd6f8584cf96193ef9e0aa42d68b5f5))
+* finalize delayed-header responses instead of returning a bare status ([#122](https://github.com/eilandert/coraza-nginx/issues/122)) ([4c85346](https://github.com/eilandert/coraza-nginx/commit/4c85346d22514fe26d0bc08a689500f1c4a6ed7d))
+* guard body filter error pages and header filter loc conf ([#123](https://github.com/eilandert/coraza-nginx/issues/123)) ([ae515a5](https://github.com/eilandert/coraza-nginx/commit/ae515a55664c559577f3cda964170d29bb7ff8a2))
+* inspect response headers after gzip and range have run ([#49](https://github.com/eilandert/coraza-nginx/issues/49)) ([f3cdd37](https://github.com/eilandert/coraza-nginx/commit/f3cdd3770437005a919ee48a7ca5a8d043b38296))
+* intervention poll consistency in the pre-access handler ([#124](https://github.com/eilandert/coraza-nginx/issues/124)) ([61e8c14](https://github.com/eilandert/coraza-nginx/commit/61e8c14ae1341e47ffce29b814d23794e4eab90a))
+* preserve the sync flag on delayed buffer copies ([#48](https://github.com/eilandert/coraza-nginx/issues/48)) ([9363e63](https://github.com/eilandert/coraza-nginx/commit/9363e633f9eef7b8b372158a49f9878dc668f9f7))
+* publish the request context only after construction succeeds ([#40](https://github.com/eilandert/coraza-nginx/issues/40)) ([817f9a6](https://github.com/eilandert/coraza-nginx/commit/817f9a6e1e6053960e3783f260b441d0b8a2669a))
+* reject premature response file EOF ([#120](https://github.com/eilandert/coraza-nginx/issues/120)) ([57ac5da](https://github.com/eilandert/coraza-nginx/commit/57ac5da6f48c1370222a3de7dd0559b27c8a2578))
+* reject ruleless Coraza enablement ([#118](https://github.com/eilandert/coraza-nginx/issues/118)) ([ced32f6](https://github.com/eilandert/coraza-nginx/commit/ced32f6b509584f5887a82ee322cf710d93d04ed))
+* reject SecRemoteRules at nginx -t instead of in every worker ([#141](https://github.com/eilandert/coraza-nginx/issues/141)) ([045f8b4](https://github.com/eilandert/coraza-nginx/commit/045f8b4798bf1487766318fb6629fd1033ef380c))
+* replace existing Location headers on a policy redirect ([#47](https://github.com/eilandert/coraza-nginx/issues/47)) ([d68d690](https://github.com/eilandert/coraza-nginx/commit/d68d690f07e1f9ffd335480a59505bcb4f3e4fea))
+* **soak:** inspect every valgrind and helgrind report and fail on empty ones ([#45](https://github.com/eilandert/coraza-nginx/issues/45)) ([58766cb](https://github.com/eilandert/coraza-nginx/commit/58766cbdd700dd27bff3d4623067ebcb6a4f1f26))
+* **soak:** keep failure evidence and treat every nonzero master exit as a failure ([#46](https://github.com/eilandert/coraza-nginx/issues/46)) ([300584a](https://github.com/eilandert/coraza-nginx/commit/300584a254b1e32e9e05d22a611d678294124586))
+* stop delayed response headers from desyncing Range and 304 responses ([#38](https://github.com/eilandert/coraza-nginx/issues/38)) ([beba3bf](https://github.com/eilandert/coraza-nginx/commit/beba3bf316ac8c2be5cfc6c604ac5deff1b4ec32))
+* stop double-submitting proxied headers; free the WAF error string ([#125](https://github.com/eilandert/coraza-nginx/issues/125)) ([4872414](https://github.com/eilandert/coraza-nginx/commit/4872414e3d9d87f51026d751c63ae38797871bab))
+* submit the request body to Coraza exactly once ([#126](https://github.com/eilandert/coraza-nginx/issues/126)) ([cd2a70c](https://github.com/eilandert/coraza-nginx/commit/cd2a70c95d051f2f55f2af3c684d71320a31a442))
+
+
+### Performance Improvements
+
+* bound file-backed response inspection ([#119](https://github.com/eilandert/coraza-nginx/issues/119)) ([1706b75](https://github.com/eilandert/coraza-nginx/commit/1706b75b29f0b17fee05a59738f653999d760dc9))
+* deduplicate WAFs by ordered rule content ([#135](https://github.com/eilandert/coraza-nginx/issues/135)) ([1f0b73e](https://github.com/eilandert/coraza-nginx/commit/1f0b73ead9e84622ac13fd81a779dda127963c06))
+* read request tempfiles in 64 KiB chunks ([#115](https://github.com/eilandert/coraza-nginx/issues/115)) ([6efa914](https://github.com/eilandert/coraza-nginx/commit/6efa9144d0da19f124f9fbc1c41e68aacb4b0865))
+* skip inaccessible request body buffering ([#113](https://github.com/eilandert/coraza-nginx/issues/113)) ([7d268d4](https://github.com/eilandert/coraza-nginx/commit/7d268d4a819bb56d1814fa97780261a648320950))
+* trim request hot-path overhead ([#134](https://github.com/eilandert/coraza-nginx/issues/134)) ([80bff01](https://github.com/eilandert/coraza-nginx/commit/80bff0116caa0c567a13f3775fa155f28912ef06))
+
 ## [0.21.0](https://github.com/corazawaf/coraza-nginx/compare/v0.20.1...v0.21.0) (2026-08-30)
 
 
