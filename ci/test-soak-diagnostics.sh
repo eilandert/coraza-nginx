@@ -30,8 +30,8 @@ new_case() {
 	export USE_VALGRIND=0 USE_HELGRIND=0 fail=0 rc=0
 }
 report() {
-	printf '==123== ERROR SUMMARY: %s errors from 0 contexts\n' "$2" >"$WORK/logs/$1.123"
-	printf '==123== definitely lost: 0 bytes in 0 blocks\n' >>"$WORK/logs/$1.123"
+	printf '==123== ERROR SUMMARY: %s errors from 0 contexts\n' "$2" >"$WORK/logs/$1.${3:-123}"
+	printf '==123== definitely lost: 0 bytes in 0 blocks\n' >>"$WORK/logs/$1.${3:-123}"
 }
 check() {
 	local name="$1" block="$2" expected="$3" marker="$4" result=0
@@ -111,6 +111,15 @@ for tool in valgrind helgrind; do
 			check "$tool-$kind" report 1 'FAIL: valgrind/helgrind errors:'
 		fi
 	done
+	new_case "$tool-second-report-error"
+	if [ "$tool" = valgrind ]; then export USE_VALGRIND=1; else export USE_HELGRIND=1; fi
+	report "$tool" 0
+	report "$tool" 1 456
+	check "$tool-second-report-error" report 1 'FAIL: valgrind/helgrind errors:'
+	new_case "$tool-empty-report"
+	if [ "$tool" = valgrind ]; then export USE_VALGRIND=1; else export USE_HELGRIND=1; fi
+	: >"$WORK/logs/$tool.123"
+	check "$tool-empty-report" report 1 'FAIL: empty selected-tool report:'
 done
 new_case both-flags-precedence
 export USE_VALGRIND=1 USE_HELGRIND=1
@@ -118,6 +127,11 @@ report valgrind 0
 check both-flags-precedence report 0 'soak clean:'
 report helgrind 1
 check both-families-one-error report 1 'FAIL: valgrind/helgrind errors:'
+new_case both-flags-unselected-empty
+export USE_VALGRIND=1 USE_HELGRIND=1
+report valgrind 0
+: >"$WORK/logs/helgrind.123"
+check both-flags-unselected-empty report 0 'soak clean:'
 
 new_case sanitizer
 printf 'inert ASan diagnostic\n' >"$WORK/logs/asan.123"

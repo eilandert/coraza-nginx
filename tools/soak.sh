@@ -289,15 +289,23 @@ shopt -s nullglob
 valgrind_logs=("$WORK"/logs/valgrind.*)
 helgrind_logs=("$WORK"/logs/helgrind.*)
 shopt -u nullglob
+selected_logs=()
 if [ "${USE_VALGRIND:-0}" = "1" ]; then
+    selected_logs=("${valgrind_logs[@]}")
     if [ "${#valgrind_logs[@]}" -eq 0 ]; then
         echo "FAIL: missing valgrind report"; problems=1
     fi
 elif [ "${USE_HELGRIND:-0}" = "1" ]; then
+    selected_logs=("${helgrind_logs[@]}")
     if [ "${#helgrind_logs[@]}" -eq 0 ]; then
         echo "FAIL: missing helgrind report"; problems=1
     fi
 fi
+for selected_log in "${selected_logs[@]}"; do
+    if [ ! -s "$selected_log" ]; then
+        echo "FAIL: empty selected-tool report: $selected_log"; problems=1
+    fi
+done
 for diagnostic_log in "${valgrind_logs[@]}" "${helgrind_logs[@]}"; do
     diagnostic_rc=0
     # Do not use -q: it can mask read errors after finding a match.
