@@ -321,6 +321,27 @@ $t->run();
 
 ###############################################################################
 
+# Read until nginx closes the socket. A stalled connection must fail the test,
+# not look like the empty response expected from `drop`.
+sub read_response {
+	my ($s, $deadline) = @_;
+	$deadline //= 5;
+	my $resp;
+	eval {
+		local $SIG{ALRM} = sub { die "Timed out reading nginx response\n" };
+		alarm $deadline;
+		local $/ = undef;
+		$resp = <$s>;
+		alarm 0;
+		1;
+	} or do {
+		my $error = $@;
+		alarm 0;
+		die $error;
+	};
+	return defined $resp ? $resp : '';
+}
+
 # Raw-socket GET. Returns the bytes nginx sent back, which is the empty string
 # when the connection was closed without a response -- the observable that
 # distinguishes a `drop` from anything that produces a status line.
@@ -337,11 +358,10 @@ sub raw_get {
 		. "Host: localhost\r\n"
 		. "Connection: close\r\n\r\n";
 
-	local $/ = undef;
-	my $resp = <$s>;
+	my $resp = read_response($s);
 	close $s;
 
-	return defined $resp ? $resp : '';
+	return $resp;
 }
 
 # Two PIPELINED keep-alive requests on ONE socket, returning both replies.
@@ -373,11 +393,8 @@ sub raw_get_keepalive_pair {
 		. "Host: localhost\r\n"
 		. "Connection: close\r\n\r\n";
 
-	local $/ = undef;
-	my $resp = <$s>;
+	my $resp = read_response($s);
 	close $s;
-
-	$resp = '' unless defined $resp;
 
 	# Split on the second status line, if there is one.
 	my @parts = split /(?=HTTP\/1\.[01] )/, $resp;

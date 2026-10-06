@@ -233,7 +233,7 @@ response rules can turn this off to restore normal header streaming.
 `deny` serves a response: the status comes from `status:`, or 403 when the
 rule does not set one (see the phase-dependent notes below for statuses nginx
 cannot serve from a request phase). A redirect action (`redirect:`, statuses
-301, 302, 303, 307, 308) serves a body-less response carrying the `Location`
+301, 302, 303, 307) serves a body-less response carrying the `Location`
 header.
 
 `drop` does not serve anything. The connection is torn down and the client
