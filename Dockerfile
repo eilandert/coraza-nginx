@@ -9,14 +9,29 @@ RUN set -eux; \
     libtool \
     gcc \
     bash \
-    make
+    make \
+    curl \
+    unzip; \
+  rm -rf /var/lib/apt/lists/*
 
-ARG LIBCORAZA_VERSION=v1.1.0
+# Omit the argument to use the checksum-verified central pin. Explicit overrides
+# retain the existing upstream tarball route.
+ARG LIBCORAZA_VERSION
+COPY .github/versions.env .github/scripts/fetch-verify.sh /tmp/ci/
 
 RUN set -eux; \
-    wget https://github.com/corazawaf/libcoraza/tarball/${LIBCORAZA_VERSION} -O /tmp/libcoraza.tar.gz; \
-    tar -xvf /tmp/libcoraza.tar.gz; \
-    cd *-libcoraza-*; \
+    mkdir -p /tmp/libcoraza-build; \
+    if [ "${LIBCORAZA_VERSION+x}" = x ]; then \
+      wget "https://github.com/corazawaf/libcoraza/tarball/${LIBCORAZA_VERSION}" -O /tmp/libcoraza.tar.gz; \
+      tar -xf /tmp/libcoraza.tar.gz -C /tmp/libcoraza-build; \
+    else \
+      . /tmp/ci/versions.env; \
+      bash /tmp/ci/fetch-verify.sh \
+        "https://github.com/corazawaf/libcoraza/archive/refs/tags/${LIBCORAZA_VERSION}.zip" \
+        "$LIBCORAZA_SHA256" /tmp/libcoraza.zip; \
+      unzip -q /tmp/libcoraza.zip -d /tmp/libcoraza-build; \
+    fi; \
+    cd /tmp/libcoraza-build/*; \
     ./build.sh; \
     ./configure; \
     make; \
@@ -45,7 +60,8 @@ RUN set -eux; \
   gnupg \
   wget \
   libpcre2-dev \
-  zlib1g-dev
+  zlib1g-dev; \
+  rm -rf /var/lib/apt/lists/*
 
 COPY . /usr/src/coraza-nginx
 
@@ -76,7 +92,7 @@ RUN ldconfig -v
 COPY ./t /tmp/t
 COPY .github/versions.env .github/scripts/fetch-verify.sh /tmp/ci/
 
-RUN apt-get update -qq && \
+RUN (apt-get update -qq && \
     apt-get install -qq --no-install-recommends curl perl && \
     . /tmp/ci/versions.env && \
     bash /tmp/ci/fetch-verify.sh \
@@ -87,5 +103,6 @@ RUN apt-get update -qq && \
     cp /tmp/t/* . && \
     export TEST_NGINX_BINARY=/usr/sbin/nginx && \
     export TEST_NGINX_GLOBALS="load_module \"/usr/lib/nginx/modules/ngx_http_coraza_module.so\"; user root;" && \
-    prove -v coraza*.t 2>&1 || true
+    prove -v coraza*.t 2>&1 || true); \
+    rm -rf /var/lib/apt/lists/* /tmp/t /tmp/ci /nginx-tests-* /tip.tar.gz
 
