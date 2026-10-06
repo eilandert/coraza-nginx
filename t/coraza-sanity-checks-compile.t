@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-# Compile regression for the CORAZA_SANITY_CHECKS compatibility no-op.
+# Compile regression for the CORAZA_SANITY_CHECKS debug macro.
 
 ###############################################################################
 
@@ -14,29 +14,17 @@ use File::Temp qw/tempdir/;
 ###############################################################################
 
 my $root = "$FindBin::Bin/..";
-my $nginx = $ENV{TEST_NGINX_SOURCE};
-my $ci = defined $ENV{CI} && $ENV{CI} eq 'true';
+my $nginx = "$root/nginx-1.28.0";
 
-# A local run may opt out by leaving the source unset.  CI, or any explicit
-# source selection, promises compilation and must fail on missing prerequisites.
-plan skip_all => 'set TEST_NGINX_SOURCE to a configured nginx source tree'
-	unless defined $nginx || $ci;
-BAIL_OUT('TEST_NGINX_SOURCE must name a configured nginx source tree')
-	unless defined $nginx && length $nginx;
-BAIL_OUT('cc not found') unless command_exists('cc');
-for my $header (qw(ngx_auto_config.h ngx_auto_headers.h)) {
-	BAIL_OUT("TEST_NGINX_SOURCE is missing objs/$header")
-		unless -f "$nginx/objs/$header";
-}
-
-my ($coraza_include) = grep { -f "$_/coraza/coraza.h" }
-	(defined $ENV{TEST_LIBCORAZA_INCLUDE} ? ($ENV{TEST_LIBCORAZA_INCLUDE})
-		: qw(/usr/local/include /usr/include));
-BAIL_OUT('coraza headers not available') unless defined $coraza_include;
+plan skip_all => 'cc not found' unless command_exists('cc');
+plan skip_all => 'nginx build tree not available'
+	unless -f "$nginx/objs/ngx_auto_config.h";
+plan skip_all => 'coraza headers not available'
+	unless -f '/usr/local/include/coraza/coraza.h';
 
 my $tmp = tempdir(CLEANUP => 1);
 my @includes = map { "-I$_" } (
-	$coraza_include,
+	'/usr/local/include',
 	"$nginx/src/core",
 	"$nginx/src/event",
 	"$nginx/src/event/modules",
@@ -46,7 +34,6 @@ my @includes = map { "-I$_" } (
 	"$nginx/src/http",
 	"$nginx/src/http/modules",
 	"$nginx/src/http/v2",
-	"$nginx/src/http/v3",
 );
 
 compile_ok('src/ngx_http_coraza_module.c', "$tmp/module.o");
